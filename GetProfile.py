@@ -15,6 +15,7 @@ logger.setLevel(logging.INFO)
 TABLE_NAME = os.environ.get('USERS_TABLE', 'chordora-users')
 BUCKET_NAME = os.environ.get('BUCKET_NAME', 'chordora-users')
 DEFAULT_IMAGE_KEY = os.environ.get('DEFAULT_IMAGE_KEY', 'public/default-profile.jpg')
+AWS_REGION = os.environ.get('AWS_REGION', 'us-east-1')
 
 # Initialisation des clients AWS
 dynamodb = boto3.resource('dynamodb')
@@ -33,18 +34,6 @@ def generate_presigned_url(bucket, object_key, expiration=3600):
     Génère une URL présignée pour accéder à un objet S3
     """
     try:
-        # Vérifie d'abord si l'objet existe dans S3
-        try:
-            s3_resource.Object(bucket, object_key).load()
-            object_exists = True
-        except Exception:
-            object_exists = False
-            logger.warning(f"L'objet {object_key} n'existe pas dans le bucket {bucket}")
-            
-        if not object_exists:
-            # Si l'image de profil n'existe pas, utiliser l'image par défaut
-            object_key = DEFAULT_IMAGE_KEY
-            
         # Générer l'URL présignée
         response = s3.generate_presigned_url(
             'get_object',
@@ -59,6 +48,27 @@ def generate_presigned_url(bucket, object_key, expiration=3600):
     except Exception as e:
         logger.error(f"Erreur lors de la génération de l'URL présignée: {str(e)}")
         logger.error(traceback.format_exc())
+        return None
+
+def check_image_exists(bucket, user_id):
+    """
+    Vérifie si une image de profil existe pour l'utilisateur et retourne son chemin
+    """
+    try:
+        # Tester différentes extensions de fichier possibles
+        for ext in ['.jpg', '.png', '.jpeg', '.webp', '']:
+            profile_image_key = f"public/users/{user_id}/profile-image{ext}"
+            try:
+                s3_resource.Object(bucket, profile_image_key).load()
+                logger.info(f"Image de profil trouvée: {profile_image_key}")
+                return profile_image_key
+            except Exception:
+                continue  # Essayer l'extension suivante
+        
+        logger.info(f"Aucune image de profil trouvée pour l'utilisateur {user_id}")
+        return None
+    except Exception as e:
+        logger.error(f"Erreur lors de la vérification de l'image: {str(e)}")
         return None
 
 def convert_dynamodb_to_profile(item):
@@ -89,6 +99,7 @@ def convert_dynamodb_to_profile(item):
         
         # Champs d'URLs et d'images
         profile['profileImageUrl'] = item.get('profileImageUrl', '')
+        profile['profileImageBase64'] = item.get('profileImageBase64', '')
         profile['bannerImageUrl'] = item.get('bannerImageUrl', '')
         
         # Liens sociaux
@@ -99,13 +110,25 @@ def convert_dynamodb_to_profile(item):
         profile['createdAt'] = item.get('createdAt', 0)
         profile['updatedAt'] = item.get('updatedAt', 0)
         
-        # Générer l'URL présignée pour l'image de profil si elle n'est pas déjà présente
+        # Si l'URL de l'image n'est pas présente dans l'item, rechercher l'image
         if not profile['profileImageUrl']:
             user_id = profile['userId']
-            profile_image_key = f"public/users/{user_id}/profile-image"
-            presigned_url = generate_presigned_url(BUCKET_NAME, profile_image_key)
-            if presigned_url:
-                profile['profileImageUrl'] = presigned_url
+            
+            # Vérifier si l'utilisateur a une image de profil
+            profile_image_key = check_image_exists(BUCKET_NAME, user_id)
+            
+            if profile_image_key:
+                # Générer l'URL présignée pour cette image
+                presigned_url = generate_presigned_url(BUCKET_NAME, profile_image_key)
+                if presigned_url:
+                    profile['profileImageUrl'] = presigned_url
+                    logger.info(f"URL présignée générée pour {user_id}: {presigned_url[:50]}...")
+            else:
+                # Utiliser l'image par défaut
+                presigned_url = generate_presigned_url(BUCKET_NAME, DEFAULT_IMAGE_KEY)
+                if presigned_url:
+                    profile['profileImageUrl'] = presigned_url
+                    logger.info(f"URL de l'image par défaut utilisée pour {user_id}")
         
         return profile
     except Exception as e:
