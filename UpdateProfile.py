@@ -15,6 +15,7 @@ logger.setLevel(logging.INFO)
 # Variables d'environnement
 TABLE_NAME = os.environ.get('USERS_TABLE', 'chordora-users')
 BUCKET_NAME = os.environ.get('BUCKET_NAME', 'chordora-users')
+DEFAULT_PROFILE_IMAGE_KEY = os.environ.get('DEFAULT_PROFILE_IMAGE_KEY', 'public/default-profile')
 
 # Initialisation des clients AWS
 dynamodb = boto3.resource('dynamodb')
@@ -93,6 +94,8 @@ def handle_update_profile(event, cors_headers, user_id):
         
         if not existing_user:
             logger.info(f"Création d'un nouveau profil utilisateur pour {user_id}")
+            # Si aucune image n'est fournie, utiliser l'image par défaut
+            profile_data['profileImageUrl'] = f"https://{BUCKET_NAME}.s3.amazonaws.com/{DEFAULT_PROFILE_IMAGE_KEY}"
             profile_data['profileCompleted'] = False
             profile_data['createdAt'] = int(datetime.datetime.now().timestamp())
         else:
@@ -133,6 +136,10 @@ def handle_update_profile(event, cors_headers, user_id):
             
             # Supprimer les données base64 pour économiser de l'espace dans DynamoDB
             del profile_data['profileImageBase64']
+        else:
+            # Si aucune image n'est fournie pour un nouveau profil ou lors d'une mise à jour
+            if not profile_data.get('profileImageUrl'):
+                profile_data['profileImageUrl'] = f"https://{BUCKET_NAME}.s3.amazonaws.com/{DEFAULT_PROFILE_IMAGE_KEY}"
 
         # Enregistrer les données dans DynamoDB
         logger.info(f"Mise à jour du profil dans DynamoDB pour l'utilisateur {user_id}")
