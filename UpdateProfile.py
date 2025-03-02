@@ -30,7 +30,7 @@ class DecimalEncoder(json.JSONEncoder):
 
 def get_cors_headers():
     return {
-        'Access-Control-Allow-Origin': 'http://localhost:3000',
+        'Access-Control-Allow-Origin': '*',  # En production, remplacer par votre domaine
         'Access-Control-Allow-Headers': 'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token',
         'Access-Control-Allow-Methods': 'POST,OPTIONS',
         'Access-Control-Allow-Credentials': 'true'
@@ -74,9 +74,52 @@ def lambda_handler(event, context):
         logger.error(traceback.format_exc())
         return {
             'statusCode': 500,
-            'headers': cors_headers,  # Important d'inclure les en-têtes CORS même en cas d'erreur
+            'headers': cors_headers,
             'body': json.dumps({'message': f'Internal server error: {str(e)}'})
         }
+
+def sanitize_profile_data(profile_data):
+    """
+    Assainit et valide les données du profil avant de les stocker
+    """
+    sanitized = {}
+    
+    # Champs de base - Chaînes de caractères
+    for field in ['userId', 'email', 'username', 'bio', 'userType', 
+                  'experienceLevel', 'location', 'software', 'musicalMood']:
+        if field in profile_data:
+            # Limiter la longueur des chaînes
+            if field == 'bio' and profile_data.get(field) and len(profile_data[field]) > 150:
+                sanitized[field] = profile_data[field][:150]
+            else:
+                sanitized[field] = profile_data.get(field)
+    
+    # Champs de listes - Vérifier et nettoyer les listes
+    for field in ['musicGenres', 'tags', 'equipment', 'favoriteArtists']:
+        if field in profile_data and isinstance(profile_data[field], list):
+            # Limiter le nombre d'éléments pour certains champs
+            if field in ['musicGenres', 'tags'] and len(profile_data[field]) > 3:
+                sanitized[field] = profile_data[field][:3]
+            else:
+                sanitized[field] = profile_data[field]
+    
+    # Traitement spécial pour socialLinks (maps)
+    if 'socialLinks' in profile_data and isinstance(profile_data['socialLinks'], dict):
+        sanitized_links = {}
+        for platform, url in profile_data['socialLinks'].items():
+            # Validation basique des URLs
+            if isinstance(url, str) and (url == '' or url.startswith('http')):
+                sanitized_links[platform] = url
+        
+        if sanitized_links:
+            sanitized['socialLinks'] = sanitized_links
+    
+    # Champs booléens
+    for field in ['profileCompleted']:
+        if field in profile_data:
+            sanitized[field] = bool(profile_data[field])
+    
+    return sanitized
 
 def handle_update_profile(event, cors_headers, user_id):
     logger.info(f"Début de handle_update_profile pour l'utilisateur: {user_id}")
@@ -88,6 +131,10 @@ def handle_update_profile(event, cors_headers, user_id):
 
         # S'assurer que l'utilisateur ne peut pas modifier l'ID utilisateur
         profile_data['userId'] = user_id
+        
+        # Assainir et valider les données du profil
+        sanitized_profile_data = sanitize_profile_data(profile_data)
+        logger.info(f"Données de profil assainies: {json.dumps(sanitized_profile_data)}")
 
         # Vérifier si l'utilisateur existe déjà
         existing_user = table.get_item(Key={'userId': user_id}).get('Item')
@@ -95,21 +142,32 @@ def handle_update_profile(event, cors_headers, user_id):
         if not existing_user:
             logger.info(f"Création d'un nouveau profil utilisateur pour {user_id}")
             # Si aucune image n'est fournie, utiliser l'image par défaut
-            profile_data['profileImageUrl'] = f"https://{BUCKET_NAME}.s3.amazonaws.com/{DEFAULT_PROFILE_IMAGE_KEY}"
-            profile_data['profileCompleted'] = False
-            profile_data['createdAt'] = int(datetime.datetime.now().timestamp())
+            sanitized_profile_data['profileImageUrl'] = f"https://{BUCKET_NAME}.s3.amazonaws.com/{DEFAULT_PROFILE_IMAGE_KEY}"
+            sanitized_profile_data['profileCompleted'] = False
+            sanitized_profile_data['createdAt'] = int(datetime.datetime.now().timestamp())
         else:
             logger.info(f"Mise à jour du profil existant pour {user_id}")
             # Fusionner les données existantes avec les nouvelles
-            profile_data = {**existing_user, **profile_data}
+            # Utiliser une approche sélective pour la fusion pour éviter d'écraser des champs existants
+            merged_profile = {}
+            
+            # Conserver toutes les clés existantes
+            for key, value in existing_user.items():
+                merged_profile[key] = value
+            
+            # Mettre à jour ou ajouter les nouvelles valeurs
+            for key, value in sanitized_profile_data.items():
+                merged_profile[key] = value
+            
+            sanitized_profile_data = merged_profile
         
         # Ajouter un timestamp de mise à jour
-        profile_data['updatedAt'] = int(datetime.datetime.now().timestamp())
+        sanitized_profile_data['updatedAt'] = int(datetime.datetime.now().timestamp())
 
         # Traiter l'image de profil si présente
-        if 'profileImageBase64' in profile_data:
+        if 'profileImageBase64' in sanitized_profile_data:
             try:
-                image_data = profile_data['profileImageBase64']
+                image_data = sanitized_profile_data['profileImageBase64']
                 # Vérifier si l'image est déjà en format base64 avec en-tête ou non
                 if ',' in image_data:
                     # Format: data:image/png;base64,BASE64_DATA
@@ -127,7 +185,7 @@ def handle_update_profile(event, cors_headers, user_id):
                     Body=image_content,
                     ContentType=content_type
                 )
-                profile_data['profileImageUrl'] = f"https://{BUCKET_NAME}.s3.amazonaws.com/public/users/{user_id}/profile-image"
+                sanitized_profile_data['profileImageUrl'] = f"https://{BUCKET_NAME}.s3.amazonaws.com/public/users/{user_id}/profile-image"
                 logger.info(f"Image de profil mise à jour pour l'utilisateur {user_id}")
             except ClientError as e:
                 logger.error(f"Erreur lors de l'upload de l'image: {str(e)}")
@@ -135,15 +193,15 @@ def handle_update_profile(event, cors_headers, user_id):
                 logger.error(f"Erreur inattendue lors du traitement de l'image: {str(e)}")
             
             # Supprimer les données base64 pour économiser de l'espace dans DynamoDB
-            del profile_data['profileImageBase64']
+            del sanitized_profile_data['profileImageBase64']
         else:
             # Si aucune image n'est fournie pour un nouveau profil ou lors d'une mise à jour
-            if not profile_data.get('profileImageUrl'):
-                profile_data['profileImageUrl'] = f"https://{BUCKET_NAME}.s3.amazonaws.com/{DEFAULT_PROFILE_IMAGE_KEY}"
+            if not sanitized_profile_data.get('profileImageUrl'):
+                sanitized_profile_data['profileImageUrl'] = f"https://{BUCKET_NAME}.s3.amazonaws.com/{DEFAULT_PROFILE_IMAGE_KEY}"
 
         # Enregistrer les données dans DynamoDB
         logger.info(f"Mise à jour du profil dans DynamoDB pour l'utilisateur {user_id}")
-        table.put_item(Item=profile_data)
+        table.put_item(Item=sanitized_profile_data)
 
         # Récupérer le profil mis à jour pour confirmer
         updated_profile = table.get_item(Key={'userId': user_id})['Item']

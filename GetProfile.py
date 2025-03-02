@@ -64,130 +64,59 @@ def generate_presigned_url(bucket, object_key, expiration=3600):
 def convert_dynamodb_to_profile(item):
     """
     Convertit un élément DynamoDB en profil utilisateur structuré.
-    Version plus robuste avec vérification des types.
+    Gère à la fois les objets DynamoDB natifs et les dictionnaires JSON standards.
     """
     try:
-        # Log l'item en entrée pour le débogage
-        logger.info(f"Item à convertir: {json.dumps(item, default=str)}")
+        # Vérifier si l'item est déjà au format dictionnaire standard
+        profile = {}
         
-        # Vérifie si l'item est déjà au format JSON standard (pas de types DynamoDB)
-        if isinstance(item.get('userId'), str):
-            # L'item est déjà un dictionnaire simple, pas besoin de conversion complexe
-            profile = {
-                'userId': item.get('userId', ''),
-                'email': item.get('email', ''),
-                'username': item.get('username', ''),  # Ajout du champ username
-                'bio': item.get('bio', ''),
-                'userType': item.get('userType', ''),
-                'experienceLevel': item.get('experienceLevel', ''),
-                'musicGenres': item.get('musicGenres', []),
-                'tags': item.get('tags', []),
-                'socialLinks': item.get('socialLinks', {}),
-                'profileImageUrl': item.get('profileImageUrl', ''),
-                'profileCompleted': item.get('profileCompleted', False),
-                'location': item.get('location', ''),
-                'software': item.get('software', ''),
-                'musicalMood': item.get('musicalMood', ''),
-                'musicGenre': item.get('musicGenre', ''),
-                'favoriteArtists': item.get('favoriteArtists', []),
-                'updatedAt': item.get('updatedAt', 0)
-            }
-            
-            # Si username est vide, utiliser une valeur par défaut
-            if not profile['username']:
-                profile['username'] = f"User_{profile['userId'][-6:]}"
-            
-            # Générer l'URL présignée pour l'image de profil
+        # Champs de base
+        profile['userId'] = item.get('userId', '')
+        profile['email'] = item.get('email', '')
+        profile['username'] = item.get('username', '') or f"User_{profile['userId'][-6:]}"
+        profile['bio'] = item.get('bio', '')
+        profile['userType'] = item.get('userType', '')
+        profile['experienceLevel'] = item.get('experienceLevel', '')
+        profile['location'] = item.get('location', '')
+        profile['software'] = item.get('software', '')
+        profile['musicalMood'] = item.get('musicalMood', '')
+        
+        # Champs de type liste
+        profile['musicGenres'] = item.get('musicGenres', [])
+        profile['tags'] = item.get('tags', [])
+        profile['equipment'] = item.get('equipment', [])
+        profile['favoriteArtists'] = item.get('favoriteArtists', [])
+        
+        # Champs d'URLs et d'images
+        profile['profileImageUrl'] = item.get('profileImageUrl', '')
+        profile['bannerImageUrl'] = item.get('bannerImageUrl', '')
+        
+        # Liens sociaux
+        profile['socialLinks'] = item.get('socialLinks', {})
+        
+        # Flags et timestamps
+        profile['profileCompleted'] = item.get('profileCompleted', False)
+        profile['createdAt'] = item.get('createdAt', 0)
+        profile['updatedAt'] = item.get('updatedAt', 0)
+        
+        # Générer l'URL présignée pour l'image de profil si elle n'est pas déjà présente
+        if not profile['profileImageUrl']:
             user_id = profile['userId']
             profile_image_key = f"public/users/{user_id}/profile-image"
             presigned_url = generate_presigned_url(BUCKET_NAME, profile_image_key)
             if presigned_url:
                 profile['profileImageUrl'] = presigned_url
-            
-            return profile
         
-        # Fonction de sécurité pour extraire les valeurs avec gestion des erreurs
-        def safe_extract(item_dict, key, attr_type, default):
-            try:
-                if key not in item_dict:
-                    return default
-                if attr_type not in item_dict[key]:
-                    return default
-                return item_dict[key][attr_type]
-            except Exception as e:
-                logger.warning(f"Erreur d'extraction pour {key}.{attr_type}: {str(e)}")
-                return default
-        
-        # Version plus sûre avec vérification des types pour DynamoDB
-        profile = {
-            'userId': safe_extract(item, 'userId', 'S', ''),
-            'email': safe_extract(item, 'email', 'S', ''),
-            'username': safe_extract(item, 'username', 'S', ''),  # Ajout du champ username
-            'bio': safe_extract(item, 'bio', 'S', ''),
-            'userType': safe_extract(item, 'userType', 'S', ''),
-            'experienceLevel': safe_extract(item, 'experienceLevel', 'S', ''),
-            
-            # Conversion des listes DynamoDB avec vérification
-            'musicGenres': [
-                genre.get('S', '') 
-                for genre in safe_extract(item, 'musicGenres', 'L', [])
-                if genre.get('S')
-            ],
-            'tags': [
-                tag.get('S', '') 
-                for tag in safe_extract(item, 'tags', 'L', [])
-                if tag.get('S')
-            ],
-            
-            # Conversion des liens sociaux avec vérification
-            'socialLinks': {
-                k: v.get('S', '') 
-                for k, v in safe_extract(item, 'socialLinks', 'M', {}).items()
-            },
-            
-            'profileImageUrl': safe_extract(item, 'profileImageUrl', 'S', ''),
-            'profileCompleted': safe_extract(item, 'profileCompleted', 'BOOL', False),
-            
-            # Champs additionnels
-            'location': safe_extract(item, 'location', 'S', ''),
-            'software': safe_extract(item, 'software', 'S', ''),
-            'musicalMood': safe_extract(item, 'musicalMood', 'S', ''),
-            'musicGenre': safe_extract(item, 'musicGenre', 'S', ''),
-            
-            'favoriteArtists': [
-                artist.get('S', '') 
-                for artist in safe_extract(item, 'favoriteArtists', 'L', [])
-                if artist.get('S')
-            ],
-        }
-        
-        # Si username est vide, utiliser une valeur par défaut basée sur l'ID
-        if not profile['username']:
-            profile['username'] = f"User_{profile['userId'][-6:]}"
-        
-        # Traitement spécial pour updatedAt qui peut être un nombre
-        try:
-            profile['updatedAt'] = int(safe_extract(item, 'updatedAt', 'N', 0))
-        except (ValueError, TypeError):
-            profile['updatedAt'] = 0
-            
-        # Générer l'URL présignée pour l'image de profil
-        user_id = profile['userId']
-        profile_image_key = f"public/users/{user_id}/profile-image"
-        presigned_url = generate_presigned_url(BUCKET_NAME, profile_image_key)
-        if presigned_url:
-            profile['profileImageUrl'] = presigned_url
-            
         return profile
     except Exception as e:
         logger.error(f"Erreur de conversion du profil: {str(e)}")
         logger.error(traceback.format_exc())
         # Au lieu de retourner None, retournons un profil minimal
-        user_id = item.get('userId', {}).get('S', '') if isinstance(item.get('userId'), dict) else item.get('userId', '')
+        user_id = item.get('userId', '')
         return {
             'userId': user_id,
             'email': 'error@conversion.failed',
-            'username': f"User_{user_id[-6:]}",  # Valeur par défaut pour username
+            'username': f"User_{user_id[-6:]}",
             'profileCompleted': False
         }
 
@@ -220,17 +149,22 @@ def lambda_handler(event, context):
 
     try:
         # Extraire l'ID utilisateur du chemin ou des paramètres
-        user_id = (
-            event.get('pathParameters', {}).get('userId') or
-            event.get('queryStringParameters', {}).get('userId')
-        )
+        path_parameters = event.get('pathParameters', {}) or {}
+        query_parameters = event.get('queryStringParameters', {}) or {}
+        
+        user_id = path_parameters.get('userId') or query_parameters.get('userId')
 
+        # Si aucun ID fourni, essayer d'utiliser l'ID de l'utilisateur authentifié
         if not user_id:
-            return {
-                'statusCode': 400,
-                'headers': cors_headers,
-                'body': json.dumps('User ID is required')
-            }
+            try:
+                user_id = event['requestContext']['authorizer']['claims']['sub']
+                logger.info(f"Utilisation de l'ID utilisateur authentifié: {user_id}")
+            except KeyError:
+                return {
+                    'statusCode': 400,
+                    'headers': cors_headers,
+                    'body': json.dumps('User ID is required')
+                }
             
         logger.info(f"Récupération du profil pour userId: {user_id}")
 
@@ -255,9 +189,6 @@ def lambda_handler(event, context):
                 'headers': cors_headers,
                 'body': json.dumps('Erreur lors du traitement du profil')
             }
-
-        # Log du profil final pour débogage
-        logger.info(f"Profil à renvoyer: {json.dumps(profile, cls=DecimalEncoder)}")
 
         # Retourner le profil
         return {
