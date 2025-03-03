@@ -4,6 +4,7 @@ import logging
 from decimal import Decimal
 import os
 import traceback
+from boto3.dynamodb.conditions import Key, Attr
 
 # Configuration du logging
 logger = logging.getLogger()
@@ -11,11 +12,13 @@ logger.setLevel(logging.INFO)
 
 # Variables d'environnement
 TRACKS_TABLE = os.environ.get('TRACKS_TABLE', 'chordora-tracks')
+LIKES_TABLE = os.environ.get('LIKES_TABLE', 'chordora-track-likes')
 BUCKET_NAME = os.environ.get('BUCKET_NAME', 'chordora-users')
 
 # Initialisation des clients AWS
 dynamodb = boto3.resource('dynamodb')
 tracks_table = dynamodb.Table(TRACKS_TABLE)
+likes_table = dynamodb.Table(LIKES_TABLE)
 s3 = boto3.client('s3')
 
 class DecimalEncoder(json.JSONEncoder):
@@ -73,65 +76,259 @@ def lambda_handler(event, context):
         }
     
     try:
-        # Extraction de l'ID utilisateur
-        if 'requestContext' not in event or 'authorizer' not in event['requestContext']:
-            return {
-                'statusCode': 401,
-                'headers': cors_headers,
-                'body': json.dumps({'message': 'Unauthorized: Missing authentication'})
-            }
-        
-        user_id = event['requestContext']['authorizer']['claims']['sub']
-        logger.info(f"Récupération des pistes pour l'utilisateur: {user_id}")
+        # Extraction de l'ID utilisateur (authentifié)
+        auth_user_id = None
+        if 'requestContext' in event and 'authorizer' in event['requestContext']:
+            auth_user_id = event['requestContext']['authorizer']['claims']['sub']
+            logger.info(f"Utilisateur authentifié: {auth_user_id}")
         
         # Récupérer les paramètres de requête
         query_params = event.get('queryStringParameters', {}) or {}
-        genre = query_params.get('genre')
+        path_params = event.get('pathParameters', {}) or {}
         
-        # Préparer les paramètres de requête DynamoDB
-        query_params = {
-            'IndexName': 'user_id-index',  # Utiliser l'index secondaire global
-            'KeyConditionExpression': 'user_id = :uid',
-            'ExpressionAttributeValues': {
-                ':uid': user_id
-            }
-        }
+        # 1. Cas: Piste spécifique par ID
+        if 'trackId' in path_params:
+            track_id = path_params['trackId']
+            logger.info(f"Récupération de la piste spécifique par ID: {track_id}")
+            return get_track_by_id(track_id, auth_user_id, cors_headers)
         
-        # Ajouter un filtre par genre si spécifié
-        if genre:
-            query_params['FilterExpression'] = 'genre = :genre'
-            query_params['ExpressionAttributeValues'][':genre'] = genre
+        # 2. Cas: Pistes likées par l'utilisateur
+        if 'likedBy' in query_params:
+            user_id_for_likes = query_params['likedBy']
+            logger.info(f"Récupération des pistes likées par: {user_id_for_likes}")
+            return get_liked_tracks(user_id_for_likes, cors_headers)
         
-        # Exécuter la requête
-        try:
-            response = tracks_table.query(**query_params)
-            tracks = response.get('Items', [])
-            
-            logger.info(f"Nombre de pistes trouvées: {len(tracks)}")
-            
-            # Générer des URLs présignées pour chaque piste
-            tracks_with_urls = generate_presigned_urls(tracks)
-            
-            return {
-                'statusCode': 200,
-                'headers': cors_headers,
-                'body': json.dumps(tracks_with_urls, cls=DecimalEncoder)
-            }
+        # 3. Cas: Pistes d'un utilisateur spécifique
+        if 'userId' in query_params:
+            target_user_id = query_params['userId']
+            logger.info(f"Récupération des pistes de l'utilisateur: {target_user_id}")
+            return get_user_tracks(target_user_id, auth_user_id, query_params, cors_headers)
         
-        except Exception as query_error:
-            logger.error(f"Erreur lors de la requête: {str(query_error)}")
-            logger.error(traceback.format_exc())
-            return {
-                'statusCode': 500,
-                'headers': cors_headers,
-                'body': json.dumps({'message': f'Erreur de requête: {str(query_error)}'})
-            }
-    
+        # 4. Cas: Pistes de l'utilisateur authentifié
+        if auth_user_id:
+            logger.info(f"Récupération des pistes de l'utilisateur authentifié: {auth_user_id}")
+            return get_user_tracks(auth_user_id, auth_user_id, query_params, cors_headers)
+        
+        # 5. Cas: Toutes les pistes (filtré par genre si spécifié)
+        logger.info("Récupération de toutes les pistes")
+        return get_all_tracks(query_params, cors_headers)
+        
     except Exception as e:
         logger.error(f"Erreur non gérée: {str(e)}")
         logger.error(traceback.format_exc())
         return {
             'statusCode': 500,
             'headers': cors_headers,
-            'body': json.dumps({'message': f'Erreur interne: {str(e)}'})
+            'body': json.dumps({'message': f'Internal server error: {str(e)}'}, cls=DecimalEncoder)
+        }
+
+def get_track_by_id(track_id, auth_user_id, cors_headers):
+    """
+    Récupère une piste spécifique par son ID
+    """
+    try:
+        # Récupérer la piste
+        response = tracks_table.get_item(Key={'track_id': track_id})
+        
+        if 'Item' not in response:
+            return {
+                'statusCode': 404,
+                'headers': cors_headers,
+                'body': json.dumps({'message': 'Track not found'})
+            }
+        
+        track = response['Item']
+        
+        # Vérifier si la piste est privée et n'appartient pas à l'utilisateur authentifié
+        if track.get('isPrivate', False) and track.get('user_id') != auth_user_id:
+            return {
+                'statusCode': 403,
+                'headers': cors_headers,
+                'body': json.dumps({'message': 'Access denied to private track'})
+            }
+        
+        # Vérifier si l'utilisateur authentifié a liké cette piste
+        is_liked = False
+        if auth_user_id:
+            like_id = f"{auth_user_id}#{track_id}"
+            like_response = likes_table.get_item(Key={'like_id': like_id})
+            is_liked = 'Item' in like_response
+        
+        # Ajouter le statut de like et l'URL présignée
+        tracks_with_urls = generate_presigned_urls([track])
+        track_with_url = tracks_with_urls[0] if tracks_with_urls else track
+        track_with_url['isLiked'] = is_liked
+        
+        return {
+            'statusCode': 200,
+            'headers': cors_headers,
+            'body': json.dumps(track_with_url, cls=DecimalEncoder)
+        }
+    
+    except Exception as e:
+        logger.error(f"Erreur lors de la récupération de la piste {track_id}: {str(e)}")
+        logger.error(traceback.format_exc())
+        return {
+            'statusCode': 500,
+            'headers': cors_headers,
+            'body': json.dumps({'message': f'Error retrieving track: {str(e)}'})
+        }
+
+def get_liked_tracks(user_id, cors_headers):
+    """
+    Récupère toutes les pistes likées par un utilisateur
+    """
+    try:
+        # Récupérer les likes de l'utilisateur
+        likes_response = likes_table.query(
+            IndexName='user_id-index',
+            KeyConditionExpression=Key('user_id').eq(user_id)
+        )
+        likes = likes_response.get('Items', [])
+        
+        if not likes:
+            return {
+                'statusCode': 200,
+                'headers': cors_headers,
+                'body': json.dumps({'tracks': [], 'count': 0}, cls=DecimalEncoder)
+            }
+        
+        # Récupérer les IDs des pistes likées
+        track_ids = [like['track_id'] for like in likes]
+        
+        # Récupérer les pistes en batch
+        tracks = []
+        
+        # BatchGetItem est limité à 100 éléments, donc on divise en chunks si nécessaire
+        chunk_size = 100
+        for i in range(0, len(track_ids), chunk_size):
+            chunk = track_ids[i:i + chunk_size]
+            keys = [{'track_id': id} for id in chunk]
+            
+            response = dynamodb.batch_get_item(
+                RequestItems={
+                    TRACKS_TABLE: {
+                        'Keys': keys
+                    }
+                }
+            )
+            
+            if TRACKS_TABLE in response.get('Responses', {}):
+                batch_tracks = response['Responses'][TRACKS_TABLE]
+                tracks.extend(batch_tracks)
+        
+        # Marquer toutes les pistes comme likées (puisqu'on les a récupérées via les likes)
+        for track in tracks:
+            track['isLiked'] = True
+        
+        # Générer les URLs présignées
+        tracks_with_urls = generate_presigned_urls(tracks)
+        
+        return {
+            'statusCode': 200,
+            'headers': cors_headers,
+            'body': json.dumps({'tracks': tracks_with_urls, 'count': len(tracks_with_urls)}, cls=DecimalEncoder)
+        }
+    
+    except Exception as e:
+        logger.error(f"Erreur lors de la récupération des pistes likées: {str(e)}")
+        logger.error(traceback.format_exc())
+        return {
+            'statusCode': 500,
+            'headers': cors_headers,
+            'body': json.dumps({'message': f'Error retrieving liked tracks: {str(e)}'})
+        }
+
+def get_user_tracks(user_id, auth_user_id, query_params, cors_headers):
+    """
+    Récupère les pistes d'un utilisateur spécifique
+    """
+    try:
+        # Paramètres de filtrage
+        genre = query_params.get('genre')
+        
+        # Requête pour les pistes de l'utilisateur
+        query_params = {
+            'IndexName': 'user_id-index',
+            'KeyConditionExpression': Key('user_id').eq(user_id)
+        }
+        
+        # Ajouter un filtre par genre si spécifié
+        if genre:
+            query_params['FilterExpression'] = Attr('genre').eq(genre)
+        
+        # Si l'utilisateur n'est pas le propriétaire, exclure les pistes privées
+        if user_id != auth_user_id:
+            if 'FilterExpression' in query_params:
+                query_params['FilterExpression'] = query_params['FilterExpression'] & Attr('isPrivate').ne(True)
+            else:
+                query_params['FilterExpression'] = Attr('isPrivate').ne(True)
+        
+        # Exécuter la requête
+        response = tracks_table.query(**query_params)
+        tracks = response.get('Items', [])
+        
+        # Si l'utilisateur est authentifié, vérifier quelles pistes il a likées
+        if auth_user_id:
+            # Récupérer les likes de l'utilisateur pour ces pistes
+            for track in tracks:
+                like_id = f"{auth_user_id}#{track['track_id']}"
+                like_response = likes_table.get_item(Key={'like_id': like_id})
+                track['isLiked'] = 'Item' in like_response
+        
+        # Générer les URLs présignées
+        tracks_with_urls = generate_presigned_urls(tracks)
+        
+        return {
+            'statusCode': 200,
+            'headers': cors_headers,
+            'body': json.dumps({'tracks': tracks_with_urls, 'count': len(tracks_with_urls)}, cls=DecimalEncoder)
+        }
+    
+    except Exception as e:
+        logger.error(f"Erreur lors de la récupération des pistes de l'utilisateur {user_id}: {str(e)}")
+        logger.error(traceback.format_exc())
+        return {
+            'statusCode': 500,
+            'headers': cors_headers,
+            'body': json.dumps({'message': f'Error retrieving user tracks: {str(e)}'})
+        }
+
+def get_all_tracks(query_params, cors_headers):
+    """
+    Récupère toutes les pistes (avec filtres optionnels)
+    """
+    try:
+        # Paramètres de filtrage
+        genre = query_params.get('genre')
+        
+        # Scan de la table avec filtres
+        scan_params = {
+            'FilterExpression': Attr('isPrivate').ne(True)  # Exclure les pistes privées
+        }
+        
+        # Ajouter un filtre par genre
+        if genre:
+            scan_params['FilterExpression'] = scan_params['FilterExpression'] & Attr('genre').eq(genre)
+        
+        # Exécuter le scan
+        response = tracks_table.scan(**scan_params)
+        tracks = response.get('Items', [])
+        
+        # Générer les URLs présignées
+        tracks_with_urls = generate_presigned_urls(tracks)
+        
+        return {
+            'statusCode': 200,
+            'headers': cors_headers,
+            'body': json.dumps({'tracks': tracks_with_urls, 'count': len(tracks_with_urls)}, cls=DecimalEncoder)
+        }
+    
+    except Exception as e:
+        logger.error(f"Erreur lors de la récupération de toutes les pistes: {str(e)}")
+        logger.error(traceback.format_exc())
+        return {
+            'statusCode': 500,
+            'headers': cors_headers,
+            'body': json.dumps({'message': f'Error retrieving all tracks: {str(e)}'})
         }

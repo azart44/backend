@@ -5,6 +5,7 @@ import logging
 import datetime
 import traceback
 from boto3.dynamodb.conditions import Key, Attr
+from decimal import Decimal
 
 # Configuration du logging
 logger = logging.getLogger()
@@ -20,6 +21,13 @@ TRACKS_TABLE = os.environ.get('TRACKS_TABLE', 'chordora-tracks')
 # Tables DynamoDB
 likes_table = dynamodb.Table(LIKES_TABLE)
 tracks_table = dynamodb.Table(TRACKS_TABLE)
+
+# Classe pour l'encodage des décimaux en JSON
+class DecimalEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, Decimal):
+            return float(obj)
+        return super(DecimalEncoder, self).default(obj)
 
 def get_cors_headers():
     """
@@ -61,7 +69,7 @@ def lambda_handler(event, context):
             if 'pathParameters' in event and event['pathParameters'] and 'trackId' in event['pathParameters']:
                 return check_like_status(event, user_id, cors_headers)
             else:
-                return get_user_likes(event, user_id, cors_headers)
+                return get_user_like_ids(event, user_id, cors_headers)
         elif event['httpMethod'] == 'POST':
             return add_like(event, user_id, cors_headers)
         elif event['httpMethod'] == 'DELETE':
@@ -113,9 +121,9 @@ def check_like_status(event, user_id, cors_headers):
             'body': json.dumps({'message': f'Error checking like status: {str(e)}'})
         }
 
-def get_user_likes(event, user_id, cors_headers):
+def get_user_like_ids(event, user_id, cors_headers):
     """
-    Récupère toutes les pistes likées par un utilisateur
+    Récupère les IDs des pistes likées par un utilisateur
     """
     try:
         # Récupérer les paramètres de requête
@@ -133,41 +141,14 @@ def get_user_likes(event, user_id, cors_headers):
         likes = response.get('Items', [])
         logger.info(f"Nombre de likes trouvés: {len(likes)}")
         
-        # Récupérer les IDs des pistes likées
+        # Récupérer uniquement les IDs des pistes likées
         track_ids = [like['track_id'] for like in likes]
-        
-        # Préparer la réponse
-        liked_tracks = []
-        
-        # Si des pistes ont été trouvées, récupérer leurs détails
-        if track_ids:
-            # BatchGetItem est limité à 100 items, diviser en chunks si nécessaire
-            chunk_size = 100
-            chunks = [track_ids[i:i + chunk_size] for i in range(0, len(track_ids), chunk_size)]
-            
-            for chunk in chunks:
-                # Préparer les clés pour BatchGetItem
-                keys = [{'track_id': track_id} for track_id in chunk]
-                
-                # Récupérer les détails des pistes en batch
-                batch_response = dynamodb.batch_get_item(
-                    RequestItems={
-                        TRACKS_TABLE: {
-                            'Keys': keys
-                        }
-                    }
-                )
-                
-                # Ajouter les pistes récupérées à la liste
-                if TRACKS_TABLE in batch_response.get('Responses', {}):
-                    tracks = batch_response['Responses'][TRACKS_TABLE]
-                    liked_tracks.extend(tracks)
         
         return {
             'statusCode': 200,
             'headers': cors_headers,
             'body': json.dumps({
-                'likedTracks': liked_tracks,
+                'trackIds': track_ids,
                 'totalLikes': len(likes)
             })
         }
@@ -314,7 +295,7 @@ def remove_like(event, user_id, cors_headers):
             'body': json.dumps({
                 'message': 'Like removed successfully',
                 'trackId': track_id
-            })
+            }, cls=DecimalEncoder)  # Utiliser DecimalEncoder ici aussi
         }
     except Exception as e:
         logger.error(f"Erreur lors de la suppression d'un like: {str(e)}")
