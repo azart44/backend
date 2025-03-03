@@ -19,21 +19,10 @@ class DecimalEncoder(json.JSONEncoder):
             return float(obj)
         return super(DecimalEncoder, self).default(obj)
 
-def get_cors_headers(event):
-    """
-    Génère les en-têtes CORS dynamiques basés sur l'origine de la requête.
-    """
-    # Obtenez l'origine de la requête si elle existe
-    origin = None
-    if 'headers' in event and event['headers']:
-        origin = event['headers'].get('origin') or event['headers'].get('Origin')
-    
-    # Définir l'origine autorisée
-    allowed_origin = origin if origin else 'http://localhost:3000'
-    
-    # Ne jamais utiliser '*' avec credentials
+# Fonction pour obtenir les en-têtes CORS
+def get_cors_headers():
     return {
-        'Access-Control-Allow-Origin': allowed_origin,
+        'Access-Control-Allow-Origin': 'http://localhost:3000',
         'Access-Control-Allow-Headers': 'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token',
         'Access-Control-Allow-Methods': 'GET,POST,PUT,DELETE,OPTIONS',
         'Access-Control-Allow-Credentials': 'true'
@@ -44,7 +33,7 @@ s3 = boto3.client('s3')
 dynamodb = boto3.resource('dynamodb')
 
 # Variables d'environnement
-BUCKET_NAME = os.environ.get('BUCKET_NAME', 'chordora-tracks')
+BUCKET_NAME = os.environ.get('BUCKET_NAME', 'chordora-users')
 TRACKS_TABLE = os.environ.get('TRACKS_TABLE', 'chordora-tracks')
 
 def lambda_handler(event, context):
@@ -61,14 +50,24 @@ def lambda_handler(event, context):
         }
     
     try:
+        # Vérification de l'authentification
+        if 'requestContext' not in event or 'authorizer' not in event['requestContext'] or 'claims' not in event['requestContext']['authorizer']:
+            logger.error("Informations d'authentification manquantes")
+            return {
+                'statusCode': 401,
+                'headers': cors_headers,
+                'body': json.dumps('Unauthorized: Missing authentication information')
+            }
+        
         user_id = event['requestContext']['authorizer']['claims']['sub']
         logger.info(f"User ID extracted: {user_id}")
-    except KeyError:
-        logger.error("Unable to extract user ID from JWT token")
+    except Exception as auth_error:
+        logger.error(f"Error extracting authentication: {str(auth_error)}")
+        logger.error(traceback.format_exc())
         return {
             'statusCode': 401,
             'headers': cors_headers,
-            'body': json.dumps('Unauthorized: Unable to extract user ID')
+            'body': json.dumps({'message': f'Authentication error: {str(auth_error)}'})
         }
     
     try:
@@ -88,7 +87,7 @@ def lambda_handler(event, context):
             return {
                 'statusCode': 400,
                 'headers': cors_headers,
-                'body': json.dumps('Unsupported HTTP method')
+                'body': json.dumps({'message': 'Unsupported HTTP method'})
             }
     except Exception as e:
         logger.error(f"Unhandled exception: {str(e)}")
@@ -117,6 +116,7 @@ def handle_get_all_tracks(event, user_id, cors_headers):
         }
     except Exception as e:
         logger.error(f"Error in handle_get_all_tracks: {str(e)}")
+        logger.error(traceback.format_exc())
         return {
             'statusCode': 500,
             'headers': cors_headers,
@@ -148,9 +148,9 @@ def handle_get_track(event, user_id, cors_headers):
             }
         
         presigned_url = s3.generate_presigned_url('get_object',
-                                                 Params={'Bucket': BUCKET_NAME,
-                                                         'Key': track['file_path']},
-                                                 ExpiresIn=3600)
+                                                  Params={'Bucket': BUCKET_NAME,
+                                                          'Key': track['file_path']},
+                                                  ExpiresIn=3600)
         
         track_info = {**track, 'presigned_url': presigned_url}
         
@@ -161,6 +161,7 @@ def handle_get_track(event, user_id, cors_headers):
         }
     except Exception as e:
         logger.error(f"Error in handle_get_track: {str(e)}")
+        logger.error(traceback.format_exc())
         return {
             'statusCode': 500,
             'headers': cors_headers,
@@ -170,66 +171,136 @@ def handle_get_track(event, user_id, cors_headers):
 def handle_post(event, user_id, cors_headers):
     logger.info("Handling POST request")
     try:
-        body = json.loads(event['body'])
+        # Vérification du corps de la requête
+        if 'body' not in event or not event['body']:
+            logger.error("Missing request body")
+            return {
+                'statusCode': 400,
+                'headers': cors_headers,
+                'body': json.dumps({'message': 'Missing request body'})
+            }
+        
+        try:
+            body = json.loads(event['body'])
+        except json.JSONDecodeError as e:
+            logger.error(f"Error parsing JSON: {str(e)}")
+            return {
+                'statusCode': 400,
+                'headers': cors_headers,
+                'body': json.dumps({'message': 'Invalid JSON in request body'})
+            }
+        
+        # Vérification des champs requis
+        required_fields = ['fileName', 'fileType', 'title', 'genre', 'bpm']
+        missing_fields = [field for field in required_fields if field not in body]
+        
+        if missing_fields:
+            logger.error(f"Missing required fields: {missing_fields}")
+            return {
+                'statusCode': 400,
+                'headers': cors_headers,
+                'body': json.dumps({'message': f'Missing required fields: {missing_fields}'})
+            }
+        
         file_name = body['fileName']
         file_type = body['fileType']
         title = body['title']
         genre = body['genre']
-        bpm = int(body['bpm'])
-        description = body.get('description', '')
-        tags = body.get('tags', [])
-        isPrivate = body.get('isPrivate', False)
         
+        # Conversion et validation du BPM
+        try:
+            bpm = int(body['bpm'])
+            if bpm <= 0:
+                logger.error(f"Invalid BPM value: {bpm}")
+                return {
+                    'statusCode': 400,
+                    'headers': cors_headers,
+                    'body': json.dumps({'message': 'BPM must be a positive number'})
+                }
+        except (ValueError, TypeError) as e:
+            logger.error(f"Error parsing BPM: {str(e)}")
+            return {
+                'statusCode': 400,
+                'headers': cors_headers,
+                'body': json.dumps({'message': 'BPM must be a valid number'})
+            }
+        
+        # Génération d'un ID unique pour la piste
         track_id = str(uuid.uuid4())
         
-        # Nouveau format de chemin incluant l'ID utilisateur pour une meilleure organisation
-        s3_key = f"tracks/{user_id}/{track_id}/{file_name}"
+        # Construction du chemin S3
+        # Format de chemin simplifié
+        s3_key = f"tracks/{track_id}/{file_name}"
+        logger.info(f"S3 key for new track: {s3_key}")
         
-        # Générer l'URL présignée
-        presigned_url = s3.generate_presigned_url(
-            'put_object',
-            Params={
-                'Bucket': BUCKET_NAME,
-                'Key': s3_key,
-                'ContentType': file_type
-            },
-            ExpiresIn=3600
-        )
+        # Génération de l'URL présignée pour l'upload
+        try:
+            presigned_url = s3.generate_presigned_url(
+                'put_object',
+                Params={
+                    'Bucket': BUCKET_NAME,
+                    'Key': s3_key,
+                    'ContentType': file_type
+                },
+                ExpiresIn=3600
+            )
+            logger.info(f"Generated presigned URL (truncated): {presigned_url[:50]}...")
+        except Exception as s3_error:
+            logger.error(f"Error generating presigned URL: {str(s3_error)}")
+            logger.error(traceback.format_exc())
+            return {
+                'statusCode': 500,
+                'headers': cors_headers,
+                'body': json.dumps({'message': f'Error generating upload URL: {str(s3_error)}'})
+            }
         
-        # Enregistrer les métadonnées dans DynamoDB
-        table = dynamodb.Table(TRACKS_TABLE)
-        timestamp = int(datetime.datetime.now().timestamp())
-        
-        track_item = {
-            'track_id': track_id,
-            'user_id': user_id,
-            'title': title,
-            'genre': genre,
-            'bpm': bpm,
-            'file_path': s3_key,
-            'created_at': timestamp,
-            'updated_at': timestamp,
-            'isPrivate': isPrivate
-        }
-        
-        # Ajouter les champs optionnels s'ils sont présents
-        if description:
-            track_item['description'] = description
-        if tags:
-            track_item['tags'] = tags
+        # Enregistrement des métadonnées dans DynamoDB
+        try:
+            table = dynamodb.Table(TRACKS_TABLE)
+            timestamp = int(datetime.datetime.now().timestamp())
             
-        table.put_item(Item=track_item)
-        
-        logger.info(f"Track metadata saved with ID: {track_id}")
-        
-        return {
-            'statusCode': 200,
-            'headers': cors_headers,
-            'body': json.dumps({
-                'trackId': track_id,
-                'uploadUrl': presigned_url
-            })
-        }
+            # Création de l'objet track
+            track_item = {
+                'track_id': track_id,
+                'user_id': user_id,
+                'title': title,
+                'genre': genre,
+                'bpm': bpm,
+                'file_path': s3_key,
+                'created_at': timestamp,
+                'updated_at': timestamp,
+                'isPrivate': body.get('isPrivate', False)
+            }
+            
+            # Ajout des champs optionnels
+            if 'description' in body:
+                track_item['description'] = body['description']
+            
+            if 'tags' in body and isinstance(body['tags'], list):
+                track_item['tags'] = body['tags']
+            
+            # Enregistrement dans DynamoDB
+            table.put_item(Item=track_item)
+            logger.info(f"Track metadata saved to DynamoDB, track_id: {track_id}")
+            
+            # Réponse avec l'URL d'upload et l'ID de la piste
+            return {
+                'statusCode': 200,
+                'headers': cors_headers,
+                'body': json.dumps({
+                    'trackId': track_id,
+                    'uploadUrl': presigned_url
+                })
+            }
+        except Exception as db_error:
+            logger.error(f"Error saving track metadata: {str(db_error)}")
+            logger.error(traceback.format_exc())
+            return {
+                'statusCode': 500,
+                'headers': cors_headers,
+                'body': json.dumps({'message': f'Error saving track metadata: {str(db_error)}'})
+            }
+            
     except Exception as e:
         logger.error(f"Error in handle_post: {str(e)}")
         logger.error(traceback.format_exc())
@@ -242,8 +313,35 @@ def handle_post(event, user_id, cors_headers):
 def handle_put(event, user_id, cors_headers):
     logger.info("Handling PUT request")
     try:
+        # Vérification de l'ID de piste
+        if 'pathParameters' not in event or not event['pathParameters'] or 'trackId' not in event['pathParameters']:
+            logger.error("Missing trackId in path parameters")
+            return {
+                'statusCode': 400,
+                'headers': cors_headers,
+                'body': json.dumps({'message': 'Missing trackId in path parameters'})
+            }
+        
         track_id = event['pathParameters']['trackId']
-        body = json.loads(event['body'])
+        
+        # Vérification du corps de la requête
+        if 'body' not in event or not event['body']:
+            logger.error("Missing request body")
+            return {
+                'statusCode': 400,
+                'headers': cors_headers,
+                'body': json.dumps({'message': 'Missing request body'})
+            }
+        
+        try:
+            body = json.loads(event['body'])
+        except json.JSONDecodeError as e:
+            logger.error(f"Error parsing JSON: {str(e)}")
+            return {
+                'statusCode': 400,
+                'headers': cors_headers,
+                'body': json.dumps({'message': 'Invalid JSON in request body'})
+            }
         
         # Vérifier si la piste existe et appartient à l'utilisateur
         table = dynamodb.Table(TRACKS_TABLE)
@@ -291,6 +389,7 @@ def handle_put(event, user_id, cors_headers):
         }
     except Exception as e:
         logger.error(f"Error in handle_put: {str(e)}")
+        logger.error(traceback.format_exc())
         return {
             'statusCode': 500,
             'headers': cors_headers,
@@ -300,6 +399,15 @@ def handle_put(event, user_id, cors_headers):
 def handle_delete(event, user_id, cors_headers):
     logger.info("Handling DELETE request")
     try:
+        # Vérification de l'ID de piste
+        if 'pathParameters' not in event or not event['pathParameters'] or 'trackId' not in event['pathParameters']:
+            logger.error("Missing trackId in path parameters")
+            return {
+                'statusCode': 400,
+                'headers': cors_headers,
+                'body': json.dumps({'message': 'Missing trackId in path parameters'})
+            }
+        
         track_id = event['pathParameters']['trackId']
         
         # Vérifier si la piste existe et appartient à l'utilisateur
@@ -328,6 +436,7 @@ def handle_delete(event, user_id, cors_headers):
                 Bucket=BUCKET_NAME,
                 Key=track['file_path']
             )
+            logger.info(f"S3 object deleted: {track['file_path']}")
         except Exception as s3_error:
             logger.error(f"Error deleting S3 object: {str(s3_error)}")
             # Continuer malgré l'erreur S3 pour au moins supprimer l'entrée de la base de données
@@ -336,6 +445,7 @@ def handle_delete(event, user_id, cors_headers):
         table.delete_item(
             Key={'track_id': track_id}
         )
+        logger.info(f"Track deleted from DynamoDB: {track_id}")
         
         return {
             'statusCode': 200,
@@ -344,6 +454,7 @@ def handle_delete(event, user_id, cors_headers):
         }
     except Exception as e:
         logger.error(f"Error in handle_delete: {str(e)}")
+        logger.error(traceback.format_exc())
         return {
             'statusCode': 500,
             'headers': cors_headers,
