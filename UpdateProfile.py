@@ -15,7 +15,6 @@ logger.setLevel(logging.INFO)
 # Variables d'environnement
 TABLE_NAME = os.environ.get('USERS_TABLE', 'chordora-users')
 BUCKET_NAME = os.environ.get('BUCKET_NAME', 'chordora-users')
-DEFAULT_PROFILE_IMAGE_KEY = os.environ.get('DEFAULT_PROFILE_IMAGE_KEY', 'public/default-profile.jpg')
 AWS_REGION = os.environ.get('AWS_REGION', 'us-east-1')
 
 # Initialisation des clients AWS
@@ -70,7 +69,6 @@ def lambda_handler(event, context):
             'body': json.dumps('Unauthorized: Unable to extract user ID')
         }
     except Exception as e:
-        # Capture et log toutes les exceptions non gérées
         logger.error(f"Erreur non gérée: {str(e)}")
         logger.error(traceback.format_exc())
         return {
@@ -152,9 +150,6 @@ def handle_update_profile(event, cors_headers, user_id):
         
         if not existing_user:
             logger.info(f"Création d'un nouveau profil utilisateur pour {user_id}")
-            # Si aucune image n'est fournie, utiliser l'image par défaut
-            if not sanitized_profile_data.get('profileImageUrl') and 'profileImageBase64' not in sanitized_profile_data:
-                sanitized_profile_data['profileImageUrl'] = f"https://{BUCKET_NAME}.s3.{AWS_REGION}.amazonaws.com/{DEFAULT_PROFILE_IMAGE_KEY}"
             sanitized_profile_data['profileCompleted'] = False
             sanitized_profile_data['createdAt'] = int(datetime.datetime.now().timestamp())
         else:
@@ -162,7 +157,6 @@ def handle_update_profile(event, cors_headers, user_id):
             logger.info(f"URL d'image existante: {existing_user.get('profileImageUrl')}")
             
             # Fusionner les données existantes avec les nouvelles
-            # Utiliser une approche sélective pour la fusion pour éviter d'écraser des champs existants
             merged_profile = {}
             
             # Conserver toutes les clés existantes
@@ -203,16 +197,8 @@ def handle_update_profile(event, cors_headers, user_id):
                         logger.error(f"Erreur lors du décodage base64: {str(e)}")
                         raise
                 
-                # Déterminer l'extension basée sur le type MIME
-                extension = '.jpg'  # Par défaut
-                if content_type == 'image/png':
-                    extension = '.png'
-                elif content_type == 'image/webp':
-                    extension = '.webp'
-                logger.info(f"Extension de fichier déterminée: {extension}")
-                
-                # Construire le chemin de stockage
-                image_key = f"public/users/{user_id}/profile-image{extension}"
+                # Construire le chemin de stockage sans extension
+                image_key = f"public/users/{user_id}/profile-image"
                 logger.info(f"Chemin de stockage dans S3: {image_key}")
                 
                 # Uploader l'image dans S3
@@ -241,11 +227,7 @@ def handle_update_profile(event, cors_headers, user_id):
             logger.info("Suppression des données profileImageBase64 pour économiser de l'espace")
             del sanitized_profile_data['profileImageBase64']
         else:
-            logger.info("Aucune image base64 trouvée dans les données")
-            # Vérifier si l'URL d'image est déjà définie
-            if not sanitized_profile_data.get('profileImageUrl'):
-                logger.info(f"Aucune URL d'image trouvée, utilisation de l'image par défaut")
-                sanitized_profile_data['profileImageUrl'] = f"https://{BUCKET_NAME}.s3.{AWS_REGION}.amazonaws.com/{DEFAULT_PROFILE_IMAGE_KEY}"
+            logger.info("Aucune nouvelle image base64 trouvée dans les données")
 
         # Ajouter un log final avant d'enregistrer dans DynamoDB
         logger.info(f"URL finale de l'image avant sauvegarde: {sanitized_profile_data.get('profileImageUrl')}")

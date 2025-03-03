@@ -34,7 +34,6 @@ def generate_presigned_url(bucket, object_key, expiration=3600):
     Génère une URL présignée pour accéder à un objet S3
     """
     try:
-        # Générer l'URL présignée
         response = s3.generate_presigned_url(
             'get_object',
             Params={
@@ -44,6 +43,14 @@ def generate_presigned_url(bucket, object_key, expiration=3600):
             ExpiresIn=expiration
         )
         logger.info(f"URL présignée générée pour {object_key}: {response[:100]}...")
+        
+        # Vérifiez les métadonnées de l'objet
+        try:
+            obj = s3.head_object(Bucket=bucket, Key=object_key)
+            logger.info(f"Métadonnées de l'objet: {obj}")
+        except Exception as e:
+            logger.error(f"Erreur lors de la vérification des métadonnées: {str(e)}")
+        
         return response
     except Exception as e:
         logger.error(f"Erreur lors de la génération de l'URL présignée: {str(e)}")
@@ -55,18 +62,14 @@ def check_image_exists(bucket, user_id):
     Vérifie si une image de profil existe pour l'utilisateur et retourne son chemin
     """
     try:
-        # Tester différentes extensions de fichier possibles
-        for ext in ['.jpg', '.png', '.jpeg', '.webp', '']:
-            profile_image_key = f"public/users/{user_id}/profile-image{ext}"
-            try:
-                s3_resource.Object(bucket, profile_image_key).load()
-                logger.info(f"Image de profil trouvée: {profile_image_key}")
-                return profile_image_key
-            except Exception:
-                continue  # Essayer l'extension suivante
-        
-        logger.info(f"Aucune image de profil trouvée pour l'utilisateur {user_id}")
-        return None
+        profile_image_key = f"public/users/{user_id}/profile-image"
+        try:
+            s3_resource.Object(bucket, profile_image_key).load()
+            logger.info(f"Image de profil trouvée: {profile_image_key}")
+            return profile_image_key
+        except Exception:
+            logger.info(f"Aucune image de profil trouvée pour l'utilisateur {user_id}")
+            return None
     except Exception as e:
         logger.error(f"Erreur lors de la vérification de l'image: {str(e)}")
         return None
@@ -74,10 +77,8 @@ def check_image_exists(bucket, user_id):
 def convert_dynamodb_to_profile(item):
     """
     Convertit un élément DynamoDB en profil utilisateur structuré.
-    Gère à la fois les objets DynamoDB natifs et les dictionnaires JSON standards.
     """
     try:
-        # Vérifier si l'item est déjà au format dictionnaire standard
         profile = {}
         
         # Champs de base
@@ -99,7 +100,6 @@ def convert_dynamodb_to_profile(item):
         
         # Champs d'URLs et d'images
         profile['profileImageUrl'] = item.get('profileImageUrl', '')
-        profile['profileImageBase64'] = item.get('profileImageBase64', '')
         profile['bannerImageUrl'] = item.get('bannerImageUrl', '')
         
         # Liens sociaux
