@@ -11,7 +11,7 @@ logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
 # Variables d'environnement
-TRACKS_TABLE = os.environ.get('TRACKS_TABLE', 'chordora-tracks')
+TRACKS_TABLE = os.environ.get('TRACKS_TABLE', 'chordora-users')
 BUCKET_NAME = os.environ.get('BUCKET_NAME', 'chordora-tracks')
 
 # Initialisation des clients AWS
