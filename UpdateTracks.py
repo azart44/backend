@@ -2,6 +2,7 @@ import json
 import boto3
 import os
 import uuid
+import datetime
 from boto3.dynamodb.conditions import Key, Attr
 import logging
 from decimal import Decimal
@@ -18,10 +19,21 @@ class DecimalEncoder(json.JSONEncoder):
             return float(obj)
         return super(DecimalEncoder, self).default(obj)
 
-# Fonction pour obtenir les en-têtes CORS
-def get_cors_headers():
+def get_cors_headers(event):
+    """
+    Génère les en-têtes CORS dynamiques basés sur l'origine de la requête.
+    """
+    # Obtenez l'origine de la requête si elle existe
+    origin = None
+    if 'headers' in event and event['headers']:
+        origin = event['headers'].get('origin') or event['headers'].get('Origin')
+    
+    # Définir l'origine autorisée
+    allowed_origin = origin if origin else 'http://localhost:3000'
+    
+    # Ne jamais utiliser '*' avec credentials
     return {
-        'Access-Control-Allow-Origin': 'http://localhost:3000',
+        'Access-Control-Allow-Origin': allowed_origin,
         'Access-Control-Allow-Headers': 'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token',
         'Access-Control-Allow-Methods': 'GET,POST,PUT,DELETE,OPTIONS',
         'Access-Control-Allow-Credentials': 'true'
@@ -32,8 +44,8 @@ s3 = boto3.client('s3')
 dynamodb = boto3.resource('dynamodb')
 
 # Variables d'environnement
-BUCKET_NAME = os.environ['BUCKET_NAME']
-TRACKS_TABLE = os.environ['TRACKS_TABLE']
+BUCKET_NAME = os.environ.get('BUCKET_NAME', 'chordora-tracks')
+TRACKS_TABLE = os.environ.get('TRACKS_TABLE', 'chordora-tracks')
 
 def lambda_handler(event, context):
     logger.info(f"Received event: {json.dumps(event)}")
@@ -136,9 +148,9 @@ def handle_get_track(event, user_id, cors_headers):
             }
         
         presigned_url = s3.generate_presigned_url('get_object',
-                                                  Params={'Bucket': BUCKET_NAME,
-                                                          'Key': track['file_path']},
-                                                  ExpiresIn=3600)
+                                                 Params={'Bucket': BUCKET_NAME,
+                                                         'Key': track['file_path']},
+                                                 ExpiresIn=3600)
         
         track_info = {**track, 'presigned_url': presigned_url}
         
@@ -164,12 +176,16 @@ def handle_post(event, user_id, cors_headers):
         title = body['title']
         genre = body['genre']
         bpm = int(body['bpm'])
+        description = body.get('description', '')
+        tags = body.get('tags', [])
+        isPrivate = body.get('isPrivate', False)
         
         track_id = str(uuid.uuid4())
-        # Important: Utiliser l'ancien format de chemin qui fonctionnait
-        s3_key = f"tracks/{track_id}/{file_name}"
         
-        # Générer l'URL présignée avec les mêmes paramètres qu'avant
+        # Nouveau format de chemin incluant l'ID utilisateur pour une meilleure organisation
+        s3_key = f"tracks/{user_id}/{track_id}/{file_name}"
+        
+        # Générer l'URL présignée
         presigned_url = s3.generate_presigned_url(
             'put_object',
             Params={
@@ -181,4 +197,155 @@ def handle_post(event, user_id, cors_headers):
         )
         
         # Enregistrer les métadonnées dans DynamoDB
-        table = d
+        table = dynamodb.Table(TRACKS_TABLE)
+        timestamp = int(datetime.datetime.now().timestamp())
+        
+        track_item = {
+            'track_id': track_id,
+            'user_id': user_id,
+            'title': title,
+            'genre': genre,
+            'bpm': bpm,
+            'file_path': s3_key,
+            'created_at': timestamp,
+            'updated_at': timestamp,
+            'isPrivate': isPrivate
+        }
+        
+        # Ajouter les champs optionnels s'ils sont présents
+        if description:
+            track_item['description'] = description
+        if tags:
+            track_item['tags'] = tags
+            
+        table.put_item(Item=track_item)
+        
+        logger.info(f"Track metadata saved with ID: {track_id}")
+        
+        return {
+            'statusCode': 200,
+            'headers': cors_headers,
+            'body': json.dumps({
+                'trackId': track_id,
+                'uploadUrl': presigned_url
+            })
+        }
+    except Exception as e:
+        logger.error(f"Error in handle_post: {str(e)}")
+        logger.error(traceback.format_exc())
+        return {
+            'statusCode': 500,
+            'headers': cors_headers,
+            'body': json.dumps({'message': f'Error creating track: {str(e)}'})
+        }
+
+def handle_put(event, user_id, cors_headers):
+    logger.info("Handling PUT request")
+    try:
+        track_id = event['pathParameters']['trackId']
+        body = json.loads(event['body'])
+        
+        # Vérifier si la piste existe et appartient à l'utilisateur
+        table = dynamodb.Table(TRACKS_TABLE)
+        response = table.get_item(Key={'track_id': track_id})
+        
+        if 'Item' not in response:
+            return {
+                'statusCode': 404,
+                'headers': cors_headers,
+                'body': json.dumps({'message': 'Track not found'})
+            }
+        
+        track = response['Item']
+        
+        if track['user_id'] != user_id:
+            return {
+                'statusCode': 403,
+                'headers': cors_headers,
+                'body': json.dumps({'message': 'Not authorized to modify this track'})
+            }
+        
+        # Préparer les mises à jour
+        update_expression = "SET updated_at = :updated_at"
+        expression_attribute_values = {
+            ':updated_at': int(datetime.datetime.now().timestamp())
+        }
+        
+        # Ajouter chaque champ à mettre à jour
+        for key, value in body.items():
+            if key not in ['track_id', 'user_id', 'file_path', 'created_at']:  # Champs qu'on ne veut pas modifier
+                update_expression += f", {key} = :{key}"
+                expression_attribute_values[f':{key}'] = value
+        
+        # Effectuer la mise à jour
+        table.update_item(
+            Key={'track_id': track_id},
+            UpdateExpression=update_expression,
+            ExpressionAttributeValues=expression_attribute_values
+        )
+        
+        return {
+            'statusCode': 200,
+            'headers': cors_headers,
+            'body': json.dumps({'message': 'Track updated successfully'})
+        }
+    except Exception as e:
+        logger.error(f"Error in handle_put: {str(e)}")
+        return {
+            'statusCode': 500,
+            'headers': cors_headers,
+            'body': json.dumps({'message': f'Error updating track: {str(e)}'})
+        }
+
+def handle_delete(event, user_id, cors_headers):
+    logger.info("Handling DELETE request")
+    try:
+        track_id = event['pathParameters']['trackId']
+        
+        # Vérifier si la piste existe et appartient à l'utilisateur
+        table = dynamodb.Table(TRACKS_TABLE)
+        response = table.get_item(Key={'track_id': track_id})
+        
+        if 'Item' not in response:
+            return {
+                'statusCode': 404,
+                'headers': cors_headers,
+                'body': json.dumps({'message': 'Track not found'})
+            }
+        
+        track = response['Item']
+        
+        if track['user_id'] != user_id:
+            return {
+                'statusCode': 403,
+                'headers': cors_headers,
+                'body': json.dumps({'message': 'Not authorized to delete this track'})
+            }
+        
+        # Supprimer le fichier de S3
+        try:
+            s3.delete_object(
+                Bucket=BUCKET_NAME,
+                Key=track['file_path']
+            )
+        except Exception as s3_error:
+            logger.error(f"Error deleting S3 object: {str(s3_error)}")
+            # Continuer malgré l'erreur S3 pour au moins supprimer l'entrée de la base de données
+        
+        # Supprimer l'entrée de DynamoDB
+        table.delete_item(
+            Key={'track_id': track_id}
+        )
+        
+        return {
+            'statusCode': 200,
+            'headers': cors_headers,
+            'body': json.dumps({'message': 'Track deleted successfully'})
+        }
+    except Exception as e:
+        logger.error(f"Error in handle_delete: {str(e)}")
+        return {
+            'statusCode': 500,
+            'headers': cors_headers,
+            'body': json.dumps({'message': f'Error deleting track: {str(e)}'})
+        }

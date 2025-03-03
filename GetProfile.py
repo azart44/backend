@@ -166,16 +166,24 @@ def convert_dynamodb_to_profile(item):
             'profileCompleted': False
         }
 
-def get_cors_headers():
+def get_cors_headers(event):
     """
-    Génère les en-têtes CORS pour les réponses.
+    Génère les en-têtes CORS dynamiques basés sur l'origine de la requête.
     """
+    # Obtenez l'origine de la requête si elle existe
+    origin = None
+    if 'headers' in event and event['headers']:
+        origin = event['headers'].get('origin') or event['headers'].get('Origin')
+    
+    # Définir l'origine autorisée
+    allowed_origin = origin if origin else 'http://localhost:3000'
+    
+    # Ne jamais utiliser '*' avec credentials
     return {
-        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Origin': allowed_origin,
         'Access-Control-Allow-Headers': 'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token',
-        'Access-Control-Allow-Methods': 'GET,POST,PUT,DELETE,OPTIONS',
-        'Access-Control-Allow-Credentials': 'true',
-        'Content-Type': 'application/json'
+        'Access-Control-Allow-Methods': 'GET,OPTIONS',
+        'Access-Control-Allow-Credentials': 'true'
     }
 
 def lambda_handler(event, context):
@@ -183,7 +191,7 @@ def lambda_handler(event, context):
     Gestionnaire principal de la Lambda pour récupérer un profil utilisateur.
     """
     logger.info(f"Événement reçu: {json.dumps(event)}")
-    cors_headers = get_cors_headers()
+    cors_headers = get_cors_headers(event)
 
     # Requête OPTIONS pour CORS
     if event['httpMethod'] == 'OPTIONS':

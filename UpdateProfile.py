@@ -45,11 +45,23 @@ def get_mime_type(image_content):
     else:
         return 'image/jpeg'  # Par défaut
 
-def get_cors_headers():
+def get_cors_headers(event):
+    """
+    Génère les en-têtes CORS dynamiques basés sur l'origine de la requête.
+    """
+    # Obtenez l'origine de la requête si elle existe
+    origin = None
+    if 'headers' in event and event['headers']:
+        origin = event['headers'].get('origin') or event['headers'].get('Origin')
+    
+    # Définir l'origine autorisée
+    allowed_origin = origin if origin else 'http://localhost:3000'
+    
+    # Ne jamais utiliser '*' avec credentials
     return {
-        'Access-Control-Allow-Origin': '*',  # En production, remplacer par votre domaine
+        'Access-Control-Allow-Origin': allowed_origin,
         'Access-Control-Allow-Headers': 'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token',
-        'Access-Control-Allow-Methods': 'POST,OPTIONS',
+        'Access-Control-Allow-Methods': 'GET,POST,PUT,DELETE,OPTIONS',
         'Access-Control-Allow-Credentials': 'true'
     }
 
