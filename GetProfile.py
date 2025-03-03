@@ -105,7 +105,8 @@ def convert_dynamodb_to_profile(item):
         profile['favoriteArtists'] = item.get('favoriteArtists', [])
         
         # Champs d'URLs et d'images
-        profile['profileImageUrl'] = item.get('profileImageUrl', '')
+        # Ne pas utiliser directement l'URL stockée, mais générer une URL présignée
+        profile['profileImageUrl'] = ''  # On va la remplir ci-dessous
         profile['profileImageBase64'] = item.get('profileImageBase64', '')
         profile['bannerImageUrl'] = item.get('bannerImageUrl', '')
         
@@ -117,41 +118,53 @@ def convert_dynamodb_to_profile(item):
         profile['createdAt'] = item.get('createdAt', 0)
         profile['updatedAt'] = item.get('updatedAt', 0)
         
-        # Si l'URL de l'image n'est pas présente dans l'item, rechercher l'image
-        if not profile['profileImageUrl']:
-            user_id = profile['userId']
-            
-            # Vérifier si l'utilisateur a une image de profil
+        # Générer une URL présignée pour l'image de profil
+        user_id = profile['userId']
+        
+        # Vérifier si l'utilisateur a une image de profil (utiliser le chemin stocké ou chercher)
+        profile_image_key = None
+        if 'profileImageUrl' in item and item['profileImageUrl']:
+            # Essayer d'extraire le chemin S3 de l'URL stockée
+            try:
+                stored_url = item['profileImageUrl']
+                if BUCKET_NAME in stored_url and 'amazonaws.com' in stored_url:
+                    # Extraire la clé du chemin complet
+                    parts = stored_url.split(f"{BUCKET_NAME}.s3.{AWS_REGION}.amazonaws.com/")
+                    if len(parts) > 1:
+                        profile_image_key = parts[1]
+                        logger.info(f"Clé d'image extraite de l'URL stockée: {profile_image_key}")
+                else:
+                    # Si ce n'est pas une URL S3 classique, utiliser comme clé directement
+                    profile_image_key = stored_url
+                    logger.info(f"Utilisation de l'URL stockée comme clé: {profile_image_key}")
+            except Exception as e:
+                logger.error(f"Erreur lors de l'extraction de la clé S3: {str(e)}")
+                # On continuera avec la recherche ci-dessous
+        
+        # Si on n'a pas pu extraire la clé, essayer de chercher l'image
+        if not profile_image_key:
             profile_image_key = check_image_exists(BUCKET_NAME, user_id)
-            
-            if profile_image_key:
-                # Générer l'URL présignée pour cette image
-                presigned_url = generate_presigned_url(BUCKET_NAME, profile_image_key)
-                if presigned_url:
-                    profile['profileImageUrl'] = presigned_url
-                    logger.info(f"URL présignée générée pour {user_id}: {presigned_url[:50]}...")
+            logger.info(f"Résultat de la recherche d'image: {profile_image_key}")
+        
+        # Générer l'URL présignée ou utiliser l'image par défaut
+        if profile_image_key:
+            # Générer l'URL présignée pour cette image
+            presigned_url = generate_presigned_url(BUCKET_NAME, profile_image_key)
+            if presigned_url:
+                profile['profileImageUrl'] = presigned_url
+                logger.info(f"URL présignée générée pour {user_id}: {presigned_url[:50]}...")
             else:
-                # Utiliser l'image par défaut
+                logger.error(f"Impossible de générer une URL présignée pour {profile_image_key}")
+                # Utiliser l'image par défaut en cas d'échec
                 presigned_url = generate_presigned_url(BUCKET_NAME, DEFAULT_IMAGE_KEY)
                 if presigned_url:
                     profile['profileImageUrl'] = presigned_url
-                    logger.info(f"URL de l'image par défaut utilisée pour {user_id}")
         else:
-            # Vérifier si l'URL existante a une extension, sinon essayer de vérifier l'existence
-            if not any(ext in profile['profileImageUrl'] for ext in ['.jpg', '.jpeg', '.png', '.webp', '.gif']):
-                logger.info(f"URL sans extension détectée: {profile['profileImageUrl']}")
-                
-                # Extraire la clé S3 de l'URL
-                try:
-                    object_key = profile['profileImageUrl'].split(f"{BUCKET_NAME}.s3.{AWS_REGION}.amazonaws.com/")[1]
-                    profile_image_key = check_image_exists(BUCKET_NAME, profile['userId'])
-                    
-                    if profile_image_key:
-                        presigned_url = generate_presigned_url(BUCKET_NAME, profile_image_key)
-                        if presigned_url:
-                            profile['profileImageUrl'] = presigned_url
-                except Exception as e:
-                    logger.error(f"Erreur lors de l'extraction de la clé S3: {str(e)}")
+            # Utiliser l'image par défaut
+            presigned_url = generate_presigned_url(BUCKET_NAME, DEFAULT_IMAGE_KEY)
+            if presigned_url:
+                profile['profileImageUrl'] = presigned_url
+                logger.info(f"URL de l'image par défaut utilisée pour {user_id}")
         
         return profile
     except Exception as e:
