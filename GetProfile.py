@@ -34,6 +34,14 @@ def generate_presigned_url(bucket, object_key, expiration=3600):
     Génère une URL présignée pour accéder à un objet S3
     """
     try:
+        # Vérifier si l'objet existe avant de générer l'URL
+        try:
+            s3_resource.Object(bucket, object_key).load()
+        except Exception as e:
+            logger.warning(f"L'objet S3 {object_key} n'existe pas: {str(e)}")
+            return None
+            
+        # Générer l'URL présignée
         response = s3.generate_presigned_url(
             'get_object',
             Params={
@@ -43,14 +51,6 @@ def generate_presigned_url(bucket, object_key, expiration=3600):
             ExpiresIn=expiration
         )
         logger.info(f"URL présignée générée pour {object_key}: {response[:100]}...")
-        
-        # Vérifiez les métadonnées de l'objet
-        try:
-            obj = s3.head_object(Bucket=bucket, Key=object_key)
-            logger.info(f"Métadonnées de l'objet: {obj}")
-        except Exception as e:
-            logger.error(f"Erreur lors de la vérification des métadonnées: {str(e)}")
-        
         return response
     except Exception as e:
         logger.error(f"Erreur lors de la génération de l'URL présignée: {str(e)}")
@@ -62,14 +62,18 @@ def check_image_exists(bucket, user_id):
     Vérifie si une image de profil existe pour l'utilisateur et retourne son chemin
     """
     try:
-        profile_image_key = f"public/users/{user_id}/profile-image"
-        try:
-            s3_resource.Object(bucket, profile_image_key).load()
-            logger.info(f"Image de profil trouvée: {profile_image_key}")
-            return profile_image_key
-        except Exception:
-            logger.info(f"Aucune image de profil trouvée pour l'utilisateur {user_id}")
-            return None
+        # Tester différentes extensions de fichier possibles
+        for ext in ['.jpg', '.png', '.jpeg', '.webp', '.gif', '']:
+            profile_image_key = f"public/users/{user_id}/profile-image{ext}"
+            try:
+                s3_resource.Object(bucket, profile_image_key).load()
+                logger.info(f"Image de profil trouvée: {profile_image_key}")
+                return profile_image_key
+            except Exception:
+                continue  # Essayer l'extension suivante
+        
+        logger.info(f"Aucune image de profil trouvée pour l'utilisateur {user_id}")
+        return None
     except Exception as e:
         logger.error(f"Erreur lors de la vérification de l'image: {str(e)}")
         return None
@@ -77,8 +81,10 @@ def check_image_exists(bucket, user_id):
 def convert_dynamodb_to_profile(item):
     """
     Convertit un élément DynamoDB en profil utilisateur structuré.
+    Gère à la fois les objets DynamoDB natifs et les dictionnaires JSON standards.
     """
     try:
+        # Vérifier si l'item est déjà au format dictionnaire standard
         profile = {}
         
         # Champs de base
@@ -100,6 +106,7 @@ def convert_dynamodb_to_profile(item):
         
         # Champs d'URLs et d'images
         profile['profileImageUrl'] = item.get('profileImageUrl', '')
+        profile['profileImageBase64'] = item.get('profileImageBase64', '')
         profile['bannerImageUrl'] = item.get('bannerImageUrl', '')
         
         # Liens sociaux
@@ -129,6 +136,22 @@ def convert_dynamodb_to_profile(item):
                 if presigned_url:
                     profile['profileImageUrl'] = presigned_url
                     logger.info(f"URL de l'image par défaut utilisée pour {user_id}")
+        else:
+            # Vérifier si l'URL existante a une extension, sinon essayer de vérifier l'existence
+            if not any(ext in profile['profileImageUrl'] for ext in ['.jpg', '.jpeg', '.png', '.webp', '.gif']):
+                logger.info(f"URL sans extension détectée: {profile['profileImageUrl']}")
+                
+                # Extraire la clé S3 de l'URL
+                try:
+                    object_key = profile['profileImageUrl'].split(f"{BUCKET_NAME}.s3.{AWS_REGION}.amazonaws.com/")[1]
+                    profile_image_key = check_image_exists(BUCKET_NAME, profile['userId'])
+                    
+                    if profile_image_key:
+                        presigned_url = generate_presigned_url(BUCKET_NAME, profile_image_key)
+                        if presigned_url:
+                            profile['profileImageUrl'] = presigned_url
+                except Exception as e:
+                    logger.error(f"Erreur lors de l'extraction de la clé S3: {str(e)}")
         
         return profile
     except Exception as e:
