@@ -1,11 +1,11 @@
 import json
 import boto3
 import os
+import datetime
 import logging
-from decimal import Decimal
-import traceback
 from boto3.dynamodb.conditions import Key, Attr
-import time
+import traceback
+from decimal import Decimal
 
 # Configuration du logging
 logger = logging.getLogger()
@@ -27,33 +27,23 @@ class DecimalEncoder(json.JSONEncoder):
             return float(obj)
         return super(DecimalEncoder, self).default(obj)
 
-def get_cors_headers(event):
-    """
-    Génère les en-têtes CORS dynamiques basés sur l'origine de la requête.
-    """
-    origin = None
-    if 'headers' in event and event['headers']:
-        origin = event['headers'].get('origin') or event['headers'].get('Origin')
-    
-    allowed_origin = origin if origin else 'http://localhost:3000'
-    
+def get_cors_headers():
+    """Retourne les en-têtes CORS standard"""
     return {
-        'Access-Control-Allow-Origin': allowed_origin,
+        'Access-Control-Allow-Origin': 'http://localhost:3000',
         'Access-Control-Allow-Headers': 'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token',
-        'Access-Control-Allow-Methods': 'GET,OPTIONS,POST,DELETE',
+        'Access-Control-Allow-Methods': 'GET,POST,PUT,DELETE,OPTIONS',
         'Access-Control-Allow-Credentials': 'true'
     }
 
 def lambda_handler(event, context):
     """
-    Fonction principale qui gère les requêtes de follow/unfollow et de récupération des statuts
+    Gestionnaire principal de la Lambda - traite toutes les opérations liées aux abonnements
     """
     logger.info(f"Événement reçu: {json.dumps(event)}")
+    cors_headers = get_cors_headers()
     
-    # Générer les en-têtes CORS
-    cors_headers = get_cors_headers(event)
-    
-    # Gestion des requêtes OPTIONS (pre-flight CORS)
+    # Gestion CORS pre-flight
     if event.get('httpMethod') == 'OPTIONS':
         return {
             'statusCode': 200,
@@ -61,99 +51,122 @@ def lambda_handler(event, context):
             'body': json.dumps('Preflight request successful')
         }
     
+    # Vérification d'authentification
     try:
-        # Vérifier l'authentification
-        if 'requestContext' not in event or 'authorizer' not in event['requestContext'] or 'claims' not in event['requestContext']['authorizer']:
-            logger.error("Informations d'authentification manquantes")
-            return {
-                'statusCode': 401,
-                'headers': cors_headers,
-                'body': json.dumps('Unauthorized: Missing authentication information')
-            }
-        
-        # Extraire l'ID utilisateur authentifié
-        auth_user_id = event['requestContext']['authorizer']['claims']['sub']
-        logger.info(f"Utilisateur authentifié: {auth_user_id}")
-        
-        # Déterminer le type de requête par la méthode et les paramètres
-        http_method = event['httpMethod']
-        path = event.get('path', '')
-        resource = event.get('resource', '')
-        path_parameters = event.get('pathParameters', {}) or {}
-        
-        # Récupération des followers de l'utilisateur courant ou spécifié
-        if http_method == 'GET' and '/followers' in path:
-            target_user_id = path_parameters.get('userId', auth_user_id)
-            logger.info(f"Récupération des followers pour l'utilisateur: {target_user_id}")
-            return get_followers(target_user_id, auth_user_id, cors_headers)
-        
-        # Récupération des utilisateurs suivis par l'utilisateur courant ou spécifié
-        elif http_method == 'GET' and '/following' in path:
-            target_user_id = path_parameters.get('userId', auth_user_id)
-            logger.info(f"Récupération des following pour l'utilisateur: {target_user_id}")
-            return get_following(target_user_id, auth_user_id, cors_headers)
-        
-        # Vérification du statut de follow entre l'utilisateur authentifié et un autre
-        elif http_method == 'GET' and '/status/' in path:
-            target_id = path_parameters.get('targetId', '')
-            logger.info(f"Vérification du statut de follow entre {auth_user_id} et {target_id}")
-            return check_follow_status(auth_user_id, target_id, cors_headers)
-        
-        # Récupération des compteurs de followers/following
-        elif http_method == 'GET' and resource == '/follow/{userId}':
-            target_user_id = path_parameters.get('userId', '')
-            logger.info(f"Récupération des compteurs pour l'utilisateur: {target_user_id}")
-            return get_follow_counts(target_user_id, cors_headers)
-        
-        elif http_method == 'GET' and resource == '/follow':
-            logger.info(f"Récupération des compteurs pour l'utilisateur authentifié: {auth_user_id}")
-            return get_follow_counts(auth_user_id, cors_headers)
-        
-        # Ajouter un follow
-        elif http_method == 'POST':
-            # Récupérer le corps de la requête
-            body = json.loads(event.get('body', '{}'))
-            followed_id = body.get('followedId', '')
-            
-            if not followed_id:
-                return {
-                    'statusCode': 400,
-                    'headers': cors_headers,
-                    'body': json.dumps({'message': 'followedId is required'})
-                }
-            
-            logger.info(f"Ajout de follow: {auth_user_id} suit {followed_id}")
-            return add_follow(auth_user_id, followed_id, cors_headers)
-        
-        # Supprimer un follow
-        elif http_method == 'DELETE':
-            # Pour DELETE, le corps peut être dans l'événement ou dans les paramètres
-            body = {}
-            if 'body' in event and event['body']:
-                body = json.loads(event['body'])
-            
-            followed_id = body.get('followedId', '')
-            if 'userId' in path_parameters:
-                followed_id = path_parameters['userId']
-            
-            if not followed_id:
-                return {
-                    'statusCode': 400,
-                    'headers': cors_headers,
-                    'body': json.dumps({'message': 'followedId is required'})
-                }
-            
-            logger.info(f"Suppression de follow: {auth_user_id} ne suit plus {followed_id}")
-            return remove_follow(auth_user_id, followed_id, cors_headers)
-        
-        else:
-            logger.warn(f"Méthode non supportée: {http_method} {path}")
-            return {
-                'statusCode': 400,
-                'headers': cors_headers,
-                'body': json.dumps({'message': 'Unsupported method or path'})
-            }
+        auth_context = event['requestContext']['authorizer']['claims']
+        follower_id = auth_context['sub']
+        logger.info(f"Utilisateur authentifié: {follower_id}")
+    except (KeyError, TypeError) as e:
+        logger.error(f"Erreur d'authentification: {str(e)}")
+        return {
+            'statusCode': 401,
+            'headers': cors_headers,
+            'body': json.dumps({'message': 'Unauthorized: Authentication required'})
+        }
     
+    # Router vers les fonctions appropriées en fonction de la méthode et du chemin
+    http_method = event['httpMethod']
+    path = event.get('path', '').rstrip('/')
+    path_parameters = event.get('pathParameters', {}) or {}
+    
+    try:
+        if http_method == 'POST':
+            # Suivre un utilisateur
+            try:
+                body = json.loads(event['body']) if event.get('body') else {}
+                followed_id = body.get('followedId')
+                
+                if not followed_id:
+                    return {
+                        'statusCode': 400,
+                        'headers': cors_headers,
+                        'body': json.dumps({'message': 'followedId is required'})
+                    }
+                
+                return follow_user(follower_id, followed_id, cors_headers)
+            except (json.JSONDecodeError, KeyError) as e:
+                logger.error(f"Erreur de traitement du body: {str(e)}")
+                return {
+                    'statusCode': 400,
+                    'headers': cors_headers,
+                    'body': json.dumps({'message': f'Invalid request body: {str(e)}'})
+                }
+                
+        elif http_method == 'DELETE':
+            # Ne plus suivre un utilisateur
+            try:
+                body = json.loads(event['body']) if event.get('body') else {}
+                followed_id = body.get('followedId')
+                
+                if not followed_id:
+                    return {
+                        'statusCode': 400,
+                        'headers': cors_headers,
+                        'body': json.dumps({'message': 'followedId is required'})
+                    }
+                
+                return unfollow_user(follower_id, followed_id, cors_headers)
+            except (json.JSONDecodeError, KeyError) as e:
+                logger.error(f"Erreur de traitement du body: {str(e)}")
+                return {
+                    'statusCode': 400,
+                    'headers': cors_headers,
+                    'body': json.dumps({'message': f'Invalid request body: {str(e)}'})
+                }
+        
+        elif http_method == 'GET':
+            # Vérifier le statut de suivi ou obtenir les liste des followers/following
+            if path.endswith('/status') or '/status/' in path:
+                if '/status/' in path:
+                    target_id = path.split('/status/')[1]
+                elif 'targetId' in path_parameters:
+                    target_id = path_parameters['targetId']
+                else:
+                    return {
+                        'statusCode': 400,
+                        'headers': cors_headers,
+                        'body': json.dumps({'message': 'Target ID is required'})
+                    }
+                    
+                return get_follow_status(follower_id, target_id, cors_headers)
+                
+            elif path.endswith('/followers') or '/followers/' in path:
+                if '/followers/' in path:
+                    user_id = path.split('/followers/')[1]
+                elif 'userId' in path_parameters:
+                    user_id = path_parameters['userId']
+                else:
+                    user_id = follower_id
+                    
+                return get_followers(user_id, follower_id, cors_headers)
+                
+            elif path.endswith('/following') or '/following/' in path:
+                if '/following/' in path:
+                    user_id = path.split('/following/')[1]
+                elif 'userId' in path_parameters:
+                    user_id = path_parameters['userId']
+                else:
+                    user_id = follower_id
+                    
+                return get_following(user_id, follower_id, cors_headers)
+                
+            else:
+                # Compteurs pour l'utilisateur spécifié ou l'utilisateur authentifié
+                if '/' in path and path.split('/')[-1] not in ['follow', 'follows']:
+                    user_id = path.split('/')[-1]
+                elif 'userId' in path_parameters:
+                    user_id = path_parameters['userId']
+                else:
+                    user_id = follower_id
+                    
+                return get_follow_counts(user_id, cors_headers)
+                
+        return {
+            'statusCode': 400,
+            'headers': cors_headers,
+            'body': json.dumps({'message': 'Invalid request method or path'})
+        }
+        
     except Exception as e:
         logger.error(f"Erreur non gérée: {str(e)}")
         logger.error(traceback.format_exc())
@@ -163,189 +176,152 @@ def lambda_handler(event, context):
             'body': json.dumps({'message': f'Internal server error: {str(e)}'})
         }
 
-def get_followers(user_id, auth_user_id, cors_headers):
+def follow_user(follower_id, followed_id, cors_headers):
     """
-    Récupère la liste des utilisateurs qui suivent un utilisateur spécifique
+    Permet à un utilisateur d'en suivre un autre
     """
+    # Vérifier que l'utilisateur ne se suit pas lui-même
+    if follower_id == followed_id:
+        return {
+            'statusCode': 400,
+            'headers': cors_headers,
+            'body': json.dumps({'message': 'Cannot follow yourself'})
+        }
+    
+    # Vérifier que l'utilisateur à suivre existe
     try:
-        # Requête pour trouver tous les follows où l'utilisateur est suivi
-        response = follows_table.query(
-            IndexName='followed_id-index',
-            KeyConditionExpression=Key('followed_id').eq(user_id)
-        )
+        user_response = users_table.get_item(Key={'userId': followed_id})
+        if 'Item' not in user_response:
+            return {
+                'statusCode': 404,
+                'headers': cors_headers,
+                'body': json.dumps({'message': 'User to follow not found'})
+            }
+    except Exception as e:
+        logger.error(f"Erreur lors de la vérification de l'utilisateur à suivre: {str(e)}")
+        return {
+            'statusCode': 500,
+            'headers': cors_headers,
+            'body': json.dumps({'message': f'Error verifying user to follow: {str(e)}'})
+        }
+    
+    # Vérifier si l'abonnement existe déjà
+    follow_id = f"{follower_id}#{followed_id}"
+    
+    try:
+        response = follows_table.get_item(Key={'follow_id': follow_id})
         
-        follows = response.get('Items', [])
-        logger.info(f"Nombre de followers trouvés: {len(follows)}")
-        
-        # Si aucun follower, retourner une liste vide
-        if not follows:
+        if 'Item' in response:
+            # L'abonnement existe déjà
+            logger.info(f"L'utilisateur {follower_id} suit déjà {followed_id}")
             return {
                 'statusCode': 200,
                 'headers': cors_headers,
                 'body': json.dumps({
-                    'followers': [],
-                    'count': 0
-                }, cls=DecimalEncoder)
+                    'message': 'Already following this user',
+                    'isFollowing': True,
+                    'followedId': followed_id,
+                    'followerId': follower_id
+                })
             }
         
-        # Récupérer les informations de profil des followers
-        followers_profiles = []
+        # Créer l'abonnement
+        timestamp = int(datetime.datetime.now().timestamp())
         
-        for follow in follows:
-            follower_id = follow['follower_id']
-            
-            # Vérifier si l'utilisateur authentifié suit ce follower
-            is_following = False
-            if auth_user_id:
-                follow_id = f"{auth_user_id}#{follower_id}"
-                follow_response = follows_table.get_item(Key={'follow_id': follow_id})
-                is_following = 'Item' in follow_response
-            
-            # Récupérer le profil du follower
-            try:
-                user_response = users_table.get_item(Key={'userId': follower_id})
-                if 'Item' in user_response:
-                    user_profile = user_response['Item']
-                    
-                    # Construire un objet simplifié du profil
-                    follower_profile = {
-                        'userId': follower_id,
-                        'username': user_profile.get('username', f"User_{follower_id[-6:]}"),
-                        'userType': user_profile.get('userType', ''),
-                        'profileImageUrl': user_profile.get('profileImageUrl', ''),
-                        'followDate': follow.get('created_at', 0),
-                        'isFollowing': is_following
-                    }
-                    
-                    followers_profiles.append(follower_profile)
-                else:
-                    # Si le profil n'existe pas, ajouter uniquement l'ID
-                    followers_profiles.append({
-                        'userId': follower_id,
-                        'username': f"User_{follower_id[-6:]}",
-                        'followDate': follow.get('created_at', 0),
-                        'isFollowing': is_following
-                    })
-            except Exception as profile_error:
-                logger.error(f"Erreur lors de la récupération du profil {follower_id}: {str(profile_error)}")
-                # Continuer avec le prochain follower
+        follows_table.put_item(
+            Item={
+                'follow_id': follow_id,
+                'follower_id': follower_id,
+                'followed_id': followed_id,
+                'created_at': timestamp
+            }
+        )
         
-        # Trier par date de follow (du plus récent au plus ancien)
-        followers_profiles.sort(key=lambda x: x.get('followDate', 0), reverse=True)
+        logger.info(f"L'utilisateur {follower_id} suit maintenant {followed_id}")
         
         return {
             'statusCode': 200,
             'headers': cors_headers,
             'body': json.dumps({
-                'followers': followers_profiles,
-                'count': len(followers_profiles)
-            }, cls=DecimalEncoder)
+                'message': 'Successfully followed user',
+                'isFollowing': True,
+                'followedId': followed_id,
+                'followerId': follower_id
+            })
         }
-    
     except Exception as e:
-        logger.error(f"Erreur lors de la récupération des followers: {str(e)}")
+        logger.error(f"Erreur lors de l'ajout de l'abonnement: {str(e)}")
         logger.error(traceback.format_exc())
         return {
             'statusCode': 500,
             'headers': cors_headers,
-            'body': json.dumps({'message': f'Error retrieving followers list: {str(e)}'})
+            'body': json.dumps({'message': f'Error adding follow: {str(e)}'})
         }
 
-def get_following(user_id, auth_user_id, cors_headers):
+def unfollow_user(follower_id, followed_id, cors_headers):
     """
-    Récupère la liste des utilisateurs suivis par un utilisateur spécifique
+    Permet à un utilisateur de ne plus en suivre un autre
     """
+    follow_id = f"{follower_id}#{followed_id}"
+    
     try:
-        # Requête pour trouver tous les follows où l'utilisateur suit d'autres personnes
-        response = follows_table.query(
-            IndexName='follower_id-index',
-            KeyConditionExpression=Key('follower_id').eq(user_id)
-        )
+        # Vérifier si l'abonnement existe
+        response = follows_table.get_item(Key={'follow_id': follow_id})
         
-        follows = response.get('Items', [])
-        logger.info(f"Nombre d'utilisateurs suivis trouvés: {len(follows)}")
-        
-        # Si aucun suivi, retourner une liste vide
-        if not follows:
+        if 'Item' not in response:
+            # L'abonnement n'existe pas
+            logger.info(f"L'utilisateur {follower_id} ne suit pas {followed_id}")
             return {
                 'statusCode': 200,
                 'headers': cors_headers,
                 'body': json.dumps({
-                    'following': [],
-                    'count': 0
-                }, cls=DecimalEncoder)
+                    'message': 'Not following this user',
+                    'isFollowing': False,
+                    'followedId': followed_id,
+                    'followerId': follower_id
+                })
             }
         
-        # Récupérer les informations de profil des utilisateurs suivis
-        following_profiles = []
+        # Supprimer l'abonnement
+        follows_table.delete_item(Key={'follow_id': follow_id})
         
-        for follow in follows:
-            followed_id = follow['followed_id']
-            
-            # Récupérer le profil de l'utilisateur suivi
-            try:
-                user_response = users_table.get_item(Key={'userId': followed_id})
-                if 'Item' in user_response:
-                    user_profile = user_response['Item']
-                    
-                    # Construire un objet simplifié du profil
-                    followed_profile = {
-                        'userId': followed_id,
-                        'username': user_profile.get('username', f"User_{followed_id[-6:]}"),
-                        'userType': user_profile.get('userType', ''),
-                        'profileImageUrl': user_profile.get('profileImageUrl', ''),
-                        'followDate': follow.get('created_at', 0),
-                        'isFollowing': True  # L'utilisateur suit cette personne, donc toujours true
-                    }
-                    
-                    following_profiles.append(followed_profile)
-                else:
-                    # Si le profil n'existe pas, ajouter uniquement l'ID
-                    following_profiles.append({
-                        'userId': followed_id,
-                        'username': f"User_{followed_id[-6:]}",
-                        'followDate': follow.get('created_at', 0),
-                        'isFollowing': True
-                    })
-            except Exception as profile_error:
-                logger.error(f"Erreur lors de la récupération du profil {followed_id}: {str(profile_error)}")
-                # Continuer avec le prochain utilisateur suivi
-        
-        # Trier par date de follow (du plus récent au plus ancien)
-        following_profiles.sort(key=lambda x: x.get('followDate', 0), reverse=True)
+        logger.info(f"L'utilisateur {follower_id} ne suit plus {followed_id}")
         
         return {
             'statusCode': 200,
             'headers': cors_headers,
             'body': json.dumps({
-                'following': following_profiles,
-                'count': len(following_profiles)
-            }, cls=DecimalEncoder)
+                'message': 'Successfully unfollowed user',
+                'isFollowing': False,
+                'followedId': followed_id,
+                'followerId': follower_id
+            })
         }
-    
     except Exception as e:
-        logger.error(f"Erreur lors de la récupération des following: {str(e)}")
+        logger.error(f"Erreur lors de la suppression de l'abonnement: {str(e)}")
         logger.error(traceback.format_exc())
         return {
             'statusCode': 500,
             'headers': cors_headers,
-            'body': json.dumps({'message': f'Error retrieving following list: {str(e)}'})
+            'body': json.dumps({'message': f'Error removing follow: {str(e)}'})
         }
 
-def check_follow_status(follower_id, followed_id, cors_headers):
+def get_follow_status(follower_id, target_id, cors_headers):
     """
-    Vérifie si un utilisateur suit un autre utilisateur
+    Vérifie si un utilisateur en suit un autre et vice versa
     """
     try:
-        # Vérifier si l'utilisateur authentifié suit l'utilisateur cible
-        follow_id = f"{follower_id}#{followed_id}"
-        follow_response = follows_table.get_item(Key={'follow_id': follow_id})
-        is_following = 'Item' in follow_response
+        # Vérifier si follower_id suit target_id
+        follow_id = f"{follower_id}#{target_id}"
+        response1 = follows_table.get_item(Key={'follow_id': follow_id})
+        is_following = 'Item' in response1
         
-        # Vérifier si l'utilisateur cible suit l'utilisateur authentifié
-        reverse_follow_id = f"{followed_id}#{follower_id}"
-        reverse_follow_response = follows_table.get_item(Key={'follow_id': reverse_follow_id})
-        is_followed_by = 'Item' in reverse_follow_response
+        # Vérifier si target_id suit follower_id
+        follow_id_reverse = f"{target_id}#{follower_id}"
+        response2 = follows_table.get_item(Key={'follow_id': follow_id_reverse})
+        is_followed_by = 'Item' in response2
+        
+        logger.info(f"Statut de suivi: {follower_id} -> {target_id}: {is_following}, {target_id} -> {follower_id}: {is_followed_by}")
         
         return {
             'statusCode': 200,
@@ -354,12 +330,11 @@ def check_follow_status(follower_id, followed_id, cors_headers):
                 'isFollowing': is_following,
                 'isFollowedBy': is_followed_by,
                 'follower_id': follower_id,
-                'followed_id': followed_id
+                'followed_id': target_id
             })
         }
-    
     except Exception as e:
-        logger.error(f"Erreur lors de la vérification du statut de follow: {str(e)}")
+        logger.error(f"Erreur lors de la vérification du statut de suivi: {str(e)}")
         logger.error(traceback.format_exc())
         return {
             'statusCode': 500,
@@ -369,24 +344,33 @@ def check_follow_status(follower_id, followed_id, cors_headers):
 
 def get_follow_counts(user_id, cors_headers):
     """
-    Récupère le nombre de followers et de following pour un utilisateur
+    Obtient le nombre de followers et d'abonnements d'un utilisateur
     """
     try:
-        # Compter les followers
+        # Vérifier que l'utilisateur existe
+        user_response = users_table.get_item(Key={'userId': user_id})
+        if 'Item' not in user_response:
+            return {
+                'statusCode': 404,
+                'headers': cors_headers,
+                'body': json.dumps({'message': 'User not found'})
+            }
+            
+        # Compter les followers (ceux qui suivent l'utilisateur)
         followers_response = follows_table.query(
             IndexName='followed_id-index',
-            KeyConditionExpression=Key('followed_id').eq(user_id),
-            Select='COUNT'
+            KeyConditionExpression=Key('followed_id').eq(user_id)
         )
         followers_count = followers_response.get('Count', 0)
         
-        # Compter les following
+        # Compter les following (ceux que l'utilisateur suit)
         following_response = follows_table.query(
             IndexName='follower_id-index',
-            KeyConditionExpression=Key('follower_id').eq(user_id),
-            Select='COUNT'
+            KeyConditionExpression=Key('follower_id').eq(user_id)
         )
         following_count = following_response.get('Count', 0)
+        
+        logger.info(f"Compteurs pour {user_id}: {followers_count} abonnés, {following_count} abonnements")
         
         return {
             'statusCode': 200,
@@ -397,115 +381,171 @@ def get_follow_counts(user_id, cors_headers):
                 'followingCount': following_count
             }, cls=DecimalEncoder)
         }
-    
     except Exception as e:
-        logger.error(f"Erreur lors de la récupération des compteurs: {str(e)}")
+        logger.error(f"Erreur lors du comptage des relations de suivi: {str(e)}")
         logger.error(traceback.format_exc())
         return {
             'statusCode': 500,
             'headers': cors_headers,
-            'body': json.dumps({'message': f'Error retrieving follow counts: {str(e)}'})
+            'body': json.dumps({'message': f'Error counting follows: {str(e)}'})
         }
 
-def add_follow(follower_id, followed_id, cors_headers):
+def get_followers(user_id, current_user_id, cors_headers):
     """
-    Ajoute une relation de follow entre deux utilisateurs
+    Obtient la liste des followers d'un utilisateur
     """
     try:
-        # Vérifier que l'utilisateur ne se suit pas lui-même
-        if follower_id == followed_id:
-            return {
-                'statusCode': 400,
-                'headers': cors_headers,
-                'body': json.dumps({'message': 'Cannot follow yourself'})
-            }
-        
-        # Vérifier que l'utilisateur à suivre existe
-        user_response = users_table.get_item(Key={'userId': followed_id})
+        # Vérifier que l'utilisateur existe
+        user_response = users_table.get_item(Key={'userId': user_id})
         if 'Item' not in user_response:
             return {
                 'statusCode': 404,
                 'headers': cors_headers,
-                'body': json.dumps({'message': 'User to follow not found'})
+                'body': json.dumps({'message': 'User not found'})
             }
+            
+        # Récupérer les followers
+        followers_response = follows_table.query(
+            IndexName='followed_id-index',
+            KeyConditionExpression=Key('followed_id').eq(user_id)
+        )
         
-        # Créer un ID unique pour la relation de follow
-        follow_id = f"{follower_id}#{followed_id}"
-        timestamp = int(time.time())
+        followers_items = followers_response.get('Items', [])
+        follower_ids = [item['follower_id'] for item in followers_items]
         
-        # Vérifier si le follow existe déjà
-        follow_response = follows_table.get_item(Key={'follow_id': follow_id})
-        if 'Item' in follow_response:
-            return {
-                'statusCode': 409,
-                'headers': cors_headers,
-                'body': json.dumps({'message': 'Already following this user'})
-            }
+        # Récupérer les informations de profil des followers
+        followers_profiles = []
         
-        # Ajouter le follow
-        follows_table.put_item(Item={
-            'follow_id': follow_id,
-            'follower_id': follower_id,
-            'followed_id': followed_id,
-            'created_at': timestamp
-        })
+        for follower_id in follower_ids:
+            follower_response = users_table.get_item(Key={'userId': follower_id})
+            if 'Item' in follower_response:
+                follower = follower_response['Item']
+                
+                # Créer un objet profil simplifié
+                profile = {
+                    'userId': follower_id,
+                    'username': follower.get('username', f"User_{follower_id[:6]}"),
+                    'userType': follower.get('userType', ''),
+                    'profileImageUrl': follower.get('profileImageUrl', '')
+                }
+                
+                # Ajouter la date de suivi
+                for item in followers_items:
+                    if item['follower_id'] == follower_id:
+                        profile['followDate'] = item.get('created_at')
+                
+                # Vérifier si l'utilisateur courant suit ce follower
+                if current_user_id != follower_id:
+                    follow_id = f"{current_user_id}#{follower_id}"
+                    is_following_response = follows_table.get_item(Key={'follow_id': follow_id})
+                    profile['isFollowing'] = 'Item' in is_following_response
+                
+                followers_profiles.append(profile)
+        
+        # Trier par date de suivi (le plus récent en premier)
+        followers_profiles = sorted(
+            followers_profiles, 
+            key=lambda x: x.get('followDate', 0), 
+            reverse=True
+        )
+        
+        logger.info(f"Récupéré {len(followers_profiles)} followers pour {user_id}")
         
         return {
             'statusCode': 200,
             'headers': cors_headers,
             'body': json.dumps({
-                'message': 'Follow added successfully',
-                'follow_id': follow_id,
-                'follower_id': follower_id,
-                'followed_id': followed_id,
-                'created_at': timestamp
-            })
+                'userId': user_id,
+                'followers': followers_profiles,
+                'count': len(followers_profiles)
+            }, cls=DecimalEncoder)
         }
-    
     except Exception as e:
-        logger.error(f"Erreur lors de l'ajout du follow: {str(e)}")
+        logger.error(f"Erreur lors de la récupération des followers: {str(e)}")
         logger.error(traceback.format_exc())
         return {
             'statusCode': 500,
             'headers': cors_headers,
-            'body': json.dumps({'message': f'Error adding follow: {str(e)}'})
+            'body': json.dumps({'message': f'Error retrieving followers: {str(e)}'})
         }
 
-def remove_follow(follower_id, followed_id, cors_headers):
+def get_following(user_id, current_user_id, cors_headers):
     """
-    Supprime une relation de follow entre deux utilisateurs
+    Obtient la liste des utilisateurs suivis par un utilisateur
     """
     try:
-        # Créer l'ID du follow
-        follow_id = f"{follower_id}#{followed_id}"
-        
-        # Vérifier si le follow existe
-        follow_response = follows_table.get_item(Key={'follow_id': follow_id})
-        if 'Item' not in follow_response:
+        # Vérifier que l'utilisateur existe
+        user_response = users_table.get_item(Key={'userId': user_id})
+        if 'Item' not in user_response:
             return {
                 'statusCode': 404,
                 'headers': cors_headers,
-                'body': json.dumps({'message': 'Follow relationship not found'})
+                'body': json.dumps({'message': 'User not found'})
             }
+            
+        # Récupérer les abonnements
+        following_response = follows_table.query(
+            IndexName='follower_id-index',
+            KeyConditionExpression=Key('follower_id').eq(user_id)
+        )
         
-        # Supprimer le follow
-        follows_table.delete_item(Key={'follow_id': follow_id})
+        following_items = following_response.get('Items', [])
+        followed_ids = [item['followed_id'] for item in following_items]
+        
+        # Récupérer les informations de profil des utilisateurs suivis
+        following_profiles = []
+        
+        for followed_id in followed_ids:
+            followed_response = users_table.get_item(Key={'userId': followed_id})
+            if 'Item' in followed_response:
+                followed = followed_response['Item']
+                
+                # Créer un objet profil simplifié
+                profile = {
+                    'userId': followed_id,
+                    'username': followed.get('username', f"User_{followed_id[:6]}"),
+                    'userType': followed.get('userType', ''),
+                    'profileImageUrl': followed.get('profileImageUrl', '')
+                }
+                
+                # Ajouter la date de suivi
+                for item in following_items:
+                    if item['followed_id'] == followed_id:
+                        profile['followDate'] = item.get('created_at')
+                
+                # Vérifier si l'utilisateur courant suit cette personne
+                if current_user_id != user_id and current_user_id != followed_id:
+                    follow_id = f"{current_user_id}#{followed_id}"
+                    is_following_response = follows_table.get_item(Key={'follow_id': follow_id})
+                    profile['isFollowing'] = 'Item' in is_following_response
+                elif current_user_id == user_id:
+                    profile['isFollowing'] = True
+                
+                following_profiles.append(profile)
+        
+        # Trier par date de suivi (le plus récent en premier)
+        following_profiles = sorted(
+            following_profiles, 
+            key=lambda x: x.get('followDate', 0), 
+            reverse=True
+        )
+        
+        logger.info(f"Récupéré {len(following_profiles)} abonnements pour {user_id}")
         
         return {
             'statusCode': 200,
             'headers': cors_headers,
             'body': json.dumps({
-                'message': 'Follow removed successfully',
-                'follower_id': follower_id,
-                'followed_id': followed_id
-            })
+                'userId': user_id,
+                'following': following_profiles,
+                'count': len(following_profiles)
+            }, cls=DecimalEncoder)
         }
-    
     except Exception as e:
-        logger.error(f"Erreur lors de la suppression du follow: {str(e)}")
+        logger.error(f"Erreur lors de la récupération des abonnements: {str(e)}")
         logger.error(traceback.format_exc())
         return {
             'statusCode': 500,
             'headers': cors_headers,
-            'body': json.dumps({'message': f'Error removing follow: {str(e)}'})
+            'body': json.dumps({'message': f'Error retrieving following: {str(e)}'})
         }
