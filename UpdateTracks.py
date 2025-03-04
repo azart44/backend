@@ -1,4 +1,3 @@
-
 import json
 import boto3
 import os
@@ -9,7 +8,6 @@ import logging
 from boto3.dynamodb.conditions import Key, Attr
 from decimal import Decimal
 import traceback
-import re
 
 # Configuration du logging
 logger = logging.getLogger()
@@ -128,6 +126,31 @@ def handle_get_all_tracks(event, user_id, cors_headers):
         tracks = response.get('Items', [])
         logger.info(f"Found {len(tracks)} tracks for user {user_id}")
         
+        # Générer des URLs présignées pour les pistes et leurs covers
+        for track in tracks:
+            if 'file_path' in track:
+                try:
+                    presigned_url = s3.generate_presigned_url(
+                        'get_object',
+                        Params={'Bucket': BUCKET_NAME, 'Key': track['file_path']},
+                        ExpiresIn=3600
+                    )
+                    track['presigned_url'] = presigned_url
+                except Exception as e:
+                    logger.error(f"Error generating presigned URL for track {track.get('track_id')}: {str(e)}")
+            
+            # Générer des URLs présignées pour les covers si elles existent
+            if 'cover_image_path' in track:
+                try:
+                    cover_presigned_url = s3.generate_presigned_url(
+                        'get_object',
+                        Params={'Bucket': BUCKET_NAME, 'Key': track['cover_image_path']},
+                        ExpiresIn=3600
+                    )
+                    track['cover_image'] = cover_presigned_url
+                except Exception as e:
+                    logger.error(f"Error generating presigned URL for cover image {track.get('track_id')}: {str(e)}")
+        
         return {
             'statusCode': 200,
             'headers': cors_headers,
@@ -166,20 +189,22 @@ def handle_get_track(event, user_id, cors_headers):
                 'body': json.dumps({'message': 'Not authorized to access this track'})
             }
         
-        # Générer URL présignée pour le fichier audio
-        presigned_url = s3.generate_presigned_url('get_object',
-                                                  Params={'Bucket': BUCKET_NAME,
-                                                          'Key': track['file_path']},
-                                                  ExpiresIn=3600)
+        # Générer l'URL présignée pour le fichier audio
+        presigned_url = s3.generate_presigned_url(
+            'get_object',
+            Params={'Bucket': BUCKET_NAME, 'Key': track['file_path']},
+            ExpiresIn=3600
+        )
         
         track_info = {**track, 'presigned_url': presigned_url}
         
         # Si une image de couverture existe, générer une URL présignée pour celle-ci également
         if 'cover_image_path' in track and track['cover_image_path']:
-            cover_presigned_url = s3.generate_presigned_url('get_object',
-                                                            Params={'Bucket': BUCKET_NAME,
-                                                                    'Key': track['cover_image_path']},
-                                                            ExpiresIn=3600)
+            cover_presigned_url = s3.generate_presigned_url(
+                'get_object',
+                Params={'Bucket': BUCKET_NAME, 'Key': track['cover_image_path']},
+                ExpiresIn=3600
+            )
             track_info['cover_image'] = cover_presigned_url
         
         return {
@@ -257,11 +282,10 @@ def handle_post(event, user_id, cors_headers):
         track_id = str(uuid.uuid4())
         
         # Construction du chemin S3
-        # Format de chemin simplifié
         s3_key = f"tracks/{user_id}/{track_id}/{file_name}"
         logger.info(f"S3 key for new track: {s3_key}")
         
-        # Génération de l'URL présignée pour l'upload audio
+        # Génération de l'URL présignée pour l'upload
         try:
             presigned_url = s3.generate_presigned_url(
                 'put_object',
@@ -284,6 +308,7 @@ def handle_post(event, user_id, cors_headers):
         
         # Traitement de l'image de couverture si présente
         cover_image_path = None
+        has_cover_image = False
         
         if 'coverImageBase64' in body and body['coverImageBase64']:
             try:
@@ -333,9 +358,326 @@ def handle_post(event, user_id, cors_headers):
                         ContentType=cover_image_type
                     )
                     
+                    has_cover_image = True
                     logger.info(f"Cover image uploaded successfully")
             except Exception as image_error:
                 logger.error(f"Error processing cover image: {str(image_error)}")
                 logger.error(traceback.format_exc())
                 # Continuer sans image de couverture en cas d'erreur
                 cover_image_path = None
+                has_cover_image = False
+        
+        # Enregistrement des métadonnées dans DynamoDB
+        try:
+            table = dynamodb.Table(TRACKS_TABLE)
+            timestamp = int(datetime.datetime.now().timestamp())
+            
+            # Création de l'objet track
+            track_item = {
+                'track_id': track_id,
+                'user_id': user_id,
+                'title': title,
+                'genre': genre,
+                'bpm': bpm,
+                'file_path': s3_key,
+                'created_at': timestamp,
+                'updated_at': timestamp,
+                'isPrivate': body.get('isPrivate', False)
+            }
+            
+            # Ajouter le chemin de l'image de couverture si elle existe
+            if cover_image_path:
+                track_item['cover_image_path'] = cover_image_path
+            
+            # Ajout des champs optionnels
+            if 'description' in body:
+                track_item['description'] = body['description']
+            
+            if 'tags' in body and isinstance(body['tags'], list):
+                track_item['tags'] = body['tags']
+            
+            # Enregistrement dans DynamoDB
+            table.put_item(Item=track_item)
+            logger.info(f"Track metadata saved to DynamoDB, track_id: {track_id}")
+            
+            # Réponse avec l'URL d'upload et l'ID de la piste
+            return {
+                'statusCode': 200,
+                'headers': cors_headers,
+                'body': json.dumps({
+                    'trackId': track_id,
+                    'uploadUrl': presigned_url,
+                    'hasCoverImage': has_cover_image
+                })
+            }
+        except Exception as db_error:
+            logger.error(f"Error saving track metadata: {str(db_error)}")
+            logger.error(traceback.format_exc())
+            return {
+                'statusCode': 500,
+                'headers': cors_headers,
+                'body': json.dumps({'message': f'Error saving track metadata: {str(db_error)}'})
+            }
+            
+    except Exception as e:
+        logger.error(f"Error in handle_post: {str(e)}")
+        logger.error(traceback.format_exc())
+        return {
+            'statusCode': 500,
+            'headers': cors_headers,
+            'body': json.dumps({'message': f'Error creating track: {str(e)}'})
+        }
+
+def handle_put(event, user_id, cors_headers):
+    logger.info("Handling PUT request for track update")
+    
+    try:
+        # Récupérer l'ID de piste
+        if 'pathParameters' not in event or not event['pathParameters'] or 'trackId' not in event['pathParameters']:
+            return {
+                'statusCode': 400,
+                'headers': cors_headers,
+                'body': json.dumps({'message': 'Missing trackId'})
+            }
+        
+        track_id = event['pathParameters']['trackId']
+        logger.info(f"Track ID to update: {track_id}")
+        
+        # Récupérer le corps de la requête
+        if 'body' not in event or not event['body']:
+            return {
+                'statusCode': 400,
+                'headers': cors_headers,
+                'body': json.dumps({'message': 'Missing request body'})
+            }
+        
+        # Parser le JSON avec gestion d'erreur
+        try:
+            body = json.loads(event['body'])
+            logger.info(f"Request body keys: {list(body.keys())}")
+        except Exception as e:
+            logger.error(f"Invalid JSON: {str(e)}")
+            return {
+                'statusCode': 400,
+                'headers': cors_headers,
+                'body': json.dumps({'message': f'Invalid JSON: {str(e)}'})
+            }
+        
+        # Récupérer la piste existante
+        table = dynamodb.Table(TRACKS_TABLE)
+        try:
+            response = table.get_item(Key={'track_id': track_id})
+            if 'Item' not in response:
+                return {
+                    'statusCode': 404,
+                    'headers': cors_headers,
+                    'body': json.dumps({'message': 'Track not found'})
+                }
+            
+            track = response['Item']
+            if track['user_id'] != user_id:
+                return {
+                    'statusCode': 403,
+                    'headers': cors_headers,
+                    'body': json.dumps({'message': 'Not authorized to update this track'})
+                }
+        except Exception as e:
+            logger.error(f"Error retrieving track: {str(e)}")
+            return {
+                'statusCode': 500,
+                'headers': cors_headers,
+                'body': json.dumps({'message': f'Error retrieving track: {str(e)}'})
+            }
+        
+        # Variable pour suivre si l'image a été mise à jour
+        cover_image_updated = False
+        
+        # Traitement de l'image de couverture si présente
+        if 'coverImageBase64' in body and body['coverImageBase64']:
+            try:
+                # Traiter l'image encodée en base64
+                cover_image_data = body['coverImageBase64']
+                cover_image_type = body.get('coverImageType', 'image/jpeg')
+                
+                # Extraire la partie base64 si le format est data:image/xxx;base64,
+                if ',' in cover_image_data:
+                    header, encoded = cover_image_data.split(',', 1)
+                    image_content = base64.b64decode(encoded)
+                    # Extraire le type MIME de l'en-tête si possible
+                    if ';' in header and ':' in header:
+                        cover_image_type = header.split(':')[1].split(';')[0]
+                else:
+                    try:
+                        image_content = base64.b64decode(cover_image_data)
+                        # Déterminer le type MIME à partir du contenu
+                        cover_image_type = get_mime_type(image_content)
+                    except Exception as e:
+                        logger.error(f"Error decoding base64 image: {str(e)}")
+                        image_content = None
+                
+                # Si l'image a été correctement décodée, l'enregistrer dans S3
+                if image_content:
+                    # Déterminer l'extension de fichier
+                    extension = '.jpg'
+                    if cover_image_type == 'image/png':
+                        extension = '.png'
+                    elif cover_image_type == 'image/webp':
+                        extension = '.webp'
+                    elif cover_image_type == 'image/gif':
+                        extension = '.gif'
+                    
+                    cover_image_filename = f"cover{extension}"
+                    cover_image_path = f"tracks/{user_id}/{track_id}/{cover_image_filename}"
+                    
+                    logger.info(f"Uploading new cover image to S3: {cover_image_path}")
+                    
+                    # Upload de l'image de couverture vers S3
+                    s3.put_object(
+                        Bucket=BUCKET_NAME,
+                        Key=cover_image_path,
+                        Body=image_content,
+                        ContentType=cover_image_type
+                    )
+                    
+                    logger.info(f"New cover image uploaded successfully")
+                    
+                    # Ajouter le chemin dans updates
+                    body['cover_image_path'] = cover_image_path
+                    cover_image_updated = True
+            except Exception as image_error:
+                logger.error(f"Error processing cover image: {str(image_error)}")
+                logger.error(traceback.format_exc())
+        
+        # Préparation des mises à jour avec l'ancienne méthode simple
+        updates = {}
+        
+        # Champs autorisés à mettre à jour
+        allowed_fields = ['title', 'genre', 'bpm', 'description', 'tags', 'isPrivate']
+        
+        for field in allowed_fields:
+            if field in body:
+                updates[field] = body[field]
+        
+        # Ajouter le chemin de l'image si mise à jour
+        if cover_image_updated and 'cover_image_path' in body:
+            updates['cover_image_path'] = body['cover_image_path']
+        
+        # Ajout du timestamp
+        updates['updated_at'] = int(datetime.datetime.now().timestamp())
+        
+        logger.info(f"Fields to update: {list(updates.keys())}")
+        
+        # Mise à jour
+        try:
+            attribute_updates = {}
+            for key, value in updates.items():
+                attribute_updates[key] = {'Value': value, 'Action': 'PUT'}
+            
+            table.update_item(
+                Key={'track_id': track_id},
+                AttributeUpdates=attribute_updates
+            )
+            
+            logger.info(f"Track {track_id} updated successfully")
+            return {
+                'statusCode': 200,
+                'headers': cors_headers,
+                'body': json.dumps({
+                    'message': 'Track updated successfully',
+                    'trackId': track_id,
+                    'coverImageUpdated': cover_image_updated
+                })
+            }
+        except Exception as e:
+            logger.error(f"Error updating track: {str(e)}")
+            return {
+                'statusCode': 500, 
+                'headers': cors_headers,
+                'body': json.dumps({'message': f'Error updating track: {str(e)}'})
+            }
+    
+    except Exception as e:
+        logger.error(f"Unhandled error: {str(e)}")
+        logger.error(traceback.format_exc())
+        return {
+            'statusCode': 500,
+            'headers': cors_headers,
+            'body': json.dumps({'message': f'Internal server error: {str(e)}'})
+        }
+
+def handle_delete(event, user_id, cors_headers):
+    logger.info("Handling DELETE request")
+    try:
+        # Vérification de l'ID de piste
+        if 'pathParameters' not in event or not event['pathParameters'] or 'trackId' not in event['pathParameters']:
+            logger.error("Missing trackId in path parameters")
+            return {
+                'statusCode': 400,
+                'headers': cors_headers,
+                'body': json.dumps({'message': 'Missing trackId in path parameters'})
+            }
+        
+        track_id = event['pathParameters']['trackId']
+        
+        # Vérifier si la piste existe et appartient à l'utilisateur
+        table = dynamodb.Table(TRACKS_TABLE)
+        response = table.get_item(Key={'track_id': track_id})
+        
+        if 'Item' not in response:
+            return {
+                'statusCode': 404,
+                'headers': cors_headers,
+                'body': json.dumps({'message': 'Track not found'})
+            }
+        
+        track = response['Item']
+        
+        if track['user_id'] != user_id:
+            return {
+                'statusCode': 403,
+                'headers': cors_headers,
+                'body': json.dumps({'message': 'Not authorized to delete this track'})
+            }
+        
+        # Supprimer le fichier audio de S3
+        try:
+            s3.delete_object(
+                Bucket=BUCKET_NAME,
+                Key=track['file_path']
+            )
+            logger.info(f"Audio file deleted from S3: {track['file_path']}")
+        except Exception as s3_error:
+            logger.error(f"Error deleting audio file from S3: {str(s3_error)}")
+            # Continuer malgré l'erreur S3 pour supprimer les autres fichiers et l'entrée DB
+        
+        # Supprimer l'image de couverture de S3 si elle existe
+        if 'cover_image_path' in track and track['cover_image_path']:
+            try:
+                s3.delete_object(
+                    Bucket=BUCKET_NAME,
+                    Key=track['cover_image_path']
+                )
+                logger.info(f"Cover image deleted from S3: {track['cover_image_path']}")
+            except Exception as s3_error:
+                logger.error(f"Error deleting cover image from S3: {str(s3_error)}")
+                # Continuer malgré l'erreur
+        
+        # Supprimer l'entrée de DynamoDB
+        table.delete_item(
+            Key={'track_id': track_id}
+        )
+        logger.info(f"Track deleted from DynamoDB: {track_id}")
+        
+        return {
+            'statusCode': 200,
+            'headers': cors_headers,
+            'body': json.dumps({'message': 'Track deleted successfully'})
+        }
+    except Exception as e:
+        logger.error(f"Error in handle_delete: {str(e)}")
+        logger.error(traceback.format_exc())
+        return {
+            'statusCode': 500,
+            'headers': cors_headers,
+            'body': json.dumps({'message': f'Error deleting track: {str(e)}'})
+        }

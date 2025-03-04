@@ -36,26 +36,56 @@ def get_cors_headers():
         'Access-Control-Allow-Credentials': 'true'
     }
 
-def generate_presigned_urls(tracks):
-    """Génère des URLs présignées pour chaque piste"""
+def generate_presigned_urls(tracks, auth_user_id=None):
+    """
+    Génère des URLs présignées pour les pistes audio et les images de couverture
+    Vérifie aussi si l'utilisateur authentifié a liké chaque piste
+    """
     tracks_with_urls = []
+    
     for track in tracks:
         try:
+            track_with_url = dict(track)  # Créer une copie pour éviter de modifier l'original
+            
+            # Générer URL présignée pour le fichier audio
             if 'file_path' in track:
-                presigned_url = s3.generate_presigned_url(
-                    'get_object',
-                    Params={'Bucket': BUCKET_NAME, 'Key': track['file_path']},
-                    ExpiresIn=3600  # URL valide 1 heure
-                )
-                track_with_url = {**track, 'presigned_url': presigned_url}
-            else:
-                track_with_url = {**track, 'error': 'Missing file path'}
+                try:
+                    presigned_url = s3.generate_presigned_url(
+                        'get_object',
+                        Params={'Bucket': BUCKET_NAME, 'Key': track['file_path']},
+                        ExpiresIn=3600  # URL valide 1 heure
+                    )
+                    track_with_url['presigned_url'] = presigned_url
+                except Exception as e:
+                    logger.error(f"Erreur lors de la génération de l'URL audio pour {track.get('track_id')}: {str(e)}")
+                    track_with_url['error'] = 'Could not generate audio URL'
+            
+            # Générer URL présignée pour l'image de couverture si elle existe
+            if 'cover_image_path' in track and track['cover_image_path']:
+                try:
+                    cover_url = s3.generate_presigned_url(
+                        'get_object',
+                        Params={'Bucket': BUCKET_NAME, 'Key': track['cover_image_path']},
+                        ExpiresIn=3600  # URL valide 1 heure
+                    )
+                    track_with_url['cover_image'] = cover_url
+                    logger.info(f"URL de couverture générée pour la piste {track.get('track_id')}")
+                except Exception as e:
+                    logger.error(f"Erreur lors de la génération de l'URL de couverture pour {track.get('track_id')}: {str(e)}")
+            
+            # Vérifier si l'utilisateur authentifié a liké cette piste
+            if auth_user_id:
+                try:
+                    like_id = f"{auth_user_id}#{track['track_id']}"
+                    like_response = likes_table.get_item(Key={'like_id': like_id})
+                    track_with_url['isLiked'] = 'Item' in like_response
+                except Exception as e:
+                    logger.error(f"Erreur lors de la vérification du like: {str(e)}")
             
             tracks_with_urls.append(track_with_url)
-        except Exception as s3_error:
-            logger.error(f"Erreur lors de la génération de l'URL présignée: {str(s3_error)}")
-            track_with_url = {**track, 'error': 'Could not generate presigned URL'}
-            tracks_with_urls.append(track_with_url)
+        except Exception as track_error:
+            logger.error(f"Erreur lors du traitement de la piste: {str(track_error)}")
+            # On continue avec les autres pistes malgré l'erreur
     
     return tracks_with_urls
 
@@ -155,17 +185,9 @@ def get_track_by_id(track_id, auth_user_id, cors_headers):
                 'body': json.dumps({'message': 'Access denied to private track'})
             }
         
-        # Vérifier si l'utilisateur authentifié a liké cette piste
-        is_liked = False
-        if auth_user_id:
-            like_id = f"{auth_user_id}#{track_id}"
-            like_response = likes_table.get_item(Key={'like_id': like_id})
-            is_liked = 'Item' in like_response
-        
-        # Ajouter le statut de like et générer l'URL présignée
-        tracks_with_urls = generate_presigned_urls([track])
+        # Générer les URLs présignées et vérifier les likes
+        tracks_with_urls = generate_presigned_urls([track], auth_user_id)
         track_with_url = tracks_with_urls[0] if tracks_with_urls else track
-        track_with_url['isLiked'] = is_liked
         
         return {
             'statusCode': 200,
@@ -228,12 +250,12 @@ def get_liked_tracks(user_id, auth_user_id, cors_headers):
         if user_id != auth_user_id:
             tracks = [track for track in tracks if not track.get('isPrivate', False)]
         
-        # Marquer toutes les pistes comme likées
+        # Marquer toutes les pistes comme likées (puisqu'elles viennent de la liste des likes)
         for track in tracks:
             track['isLiked'] = True
         
         # Générer les URLs présignées
-        tracks_with_urls = generate_presigned_urls(tracks)
+        tracks_with_urls = generate_presigned_urls(tracks, auth_user_id)
         
         return {
             'statusCode': 200,
@@ -277,15 +299,14 @@ def get_user_tracks(user_id, auth_user_id, query_params, cors_headers):
         response = tracks_table.query(**query_params)
         tracks = response.get('Items', [])
         
-        # Si l'utilisateur est authentifié, vérifier quelles pistes il a likées
-        if auth_user_id:
-            for track in tracks:
-                like_id = f"{auth_user_id}#{track['track_id']}"
-                like_response = likes_table.get_item(Key={'like_id': like_id})
-                track['isLiked'] = 'Item' in like_response
+        # Générer les URLs présignées et vérifier si l'utilisateur a liké les pistes
+        tracks_with_urls = generate_presigned_urls(tracks, auth_user_id)
         
-        # Générer les URLs présignées
-        tracks_with_urls = generate_presigned_urls(tracks)
+        # Ajout de noms d'artistes (peut être adapté selon votre logique d'affichage)
+        for track in tracks_with_urls:
+            if 'artist' not in track:
+                # Si pas de nom d'artiste, utiliser le user_id (à adapter selon votre logique)
+                track['artist'] = "Artiste"  # Vous pourriez charger le nom d'utilisateur depuis une autre table
         
         return {
             'statusCode': 200,
