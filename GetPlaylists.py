@@ -119,7 +119,7 @@ def get_playlist_by_id(playlist_id, auth_user_id, cors_headers):
         
         # Récupérer les pistes de la playlist
         if 'track_ids' in playlist and playlist['track_ids']:
-            playlist['tracks'] = get_tracks_by_ids(playlist['track_ids'], playlist.get('track_positions', {}))
+            playlist['tracks'] = get_tracks_by_ids(playlist['track_ids'], playlist.get('track_positions', {}), auth_user_id, playlist['user_id'])
         else:
             playlist['tracks'] = []
         
@@ -160,7 +160,7 @@ def get_user_playlists(user_id, auth_user_id, cors_headers, query_params):
         if include_tracks:
             for playlist in playlists:
                 if 'track_ids' in playlist and playlist['track_ids']:
-                    playlist['tracks'] = get_tracks_by_ids(playlist['track_ids'], playlist.get('track_positions', {}))
+                    playlist['tracks'] = get_tracks_by_ids(playlist['track_ids'], playlist.get('track_positions', {}), auth_user_id, playlist['user_id'])
                 else:
                     playlist['tracks'] = []
         
@@ -183,7 +183,7 @@ def get_user_playlists(user_id, auth_user_id, cors_headers, query_params):
             'body': json.dumps({'message': f'Error retrieving user playlists: {str(e)}'})
         }
 
-def get_tracks_by_ids(track_ids, track_positions):
+def get_tracks_by_ids(track_ids, track_positions, auth_user_id=None, playlist_owner_id=None):
     """Récupère plusieurs pistes par leurs IDs et ajoute leurs positions"""
     try:
         if not track_ids:
@@ -210,8 +210,18 @@ def get_tracks_by_ids(track_ids, track_positions):
                 tracks_batch = batch_response['Responses'][TRACKS_TABLE]
                 
                 for track in tracks_batch:
-                    # Ajouter la position depuis track_positions
                     track_id = track['track_id']
+                    
+                    # Vérifier si la piste est privée
+                    is_private = track.get('isPrivate', False)
+                    
+                    # Si la piste est privée et l'utilisateur n'est pas le propriétaire de la piste
+                    # et n'est pas le propriétaire de la playlist, ne pas l'afficher
+                    if is_private and track.get('user_id') != auth_user_id and auth_user_id != playlist_owner_id:
+                        logger.info(f"Piste privée {track_id} filtrée pour l'utilisateur {auth_user_id}")
+                        continue
+                    
+                    # Ajouter la position depuis track_positions
                     track['position'] = track_positions.get(track_id, 0)
                     
                     # Générer des URLs présignées pour l'audio
