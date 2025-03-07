@@ -162,21 +162,10 @@ def handle_create_update_playlist(event, user_id, cors_headers):
                     if isinstance(track_data, dict) and 'track_id' in track_data:
                         track_id = track_data['track_id']
                         
-                        # Vérifier si la piste existe et appartient à l'utilisateur
+                        # Vérifier si la piste existe
                         try:
                             track_response = tracks_table.get_item(Key={'track_id': track_id})
                             if 'Item' in track_response:
-                                track = track_response['Item']
-                                
-                                # Vérification critique: la piste doit appartenir à l'utilisateur
-                                if track.get('user_id') != user_id:
-                                    return {
-                                        'statusCode': 403,
-                                        'headers': cors_headers,
-                                        'body': json.dumps({'message': 'Vous ne pouvez ajouter que vos propres pistes à vos playlists'})
-                                    }
-                                
-                                # Si la vérification est réussie, ajouter la piste
                                 track_ids.append(track_id)
                                 track_positions[track_id] = i
                         except Exception as e:
@@ -246,21 +235,10 @@ def handle_create_update_playlist(event, user_id, cors_headers):
                     if isinstance(track_data, dict) and 'track_id' in track_data:
                         track_id = track_data['track_id']
                         
-                        # Vérifier si la piste existe et appartient à l'utilisateur
+                        # Vérifier si la piste existe
                         try:
                             track_response = tracks_table.get_item(Key={'track_id': track_id})
                             if 'Item' in track_response:
-                                track = track_response['Item']
-                                
-                                # Vérification critique: la piste doit appartenir à l'utilisateur
-                                if track.get('user_id') != user_id:
-                                    return {
-                                        'statusCode': 403,
-                                        'headers': cors_headers,
-                                        'body': json.dumps({'message': 'Vous ne pouvez ajouter que vos propres pistes à vos playlists'})
-                                    }
-                                
-                                # Si la vérification est réussie, ajouter la piste
                                 track_ids.append(track_id)
                                 track_positions[track_id] = i
                         except Exception as e:
