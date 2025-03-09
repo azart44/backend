@@ -70,7 +70,7 @@ def generate_presigned_urls(tracks, auth_user_id=None):
                                 'ResponseContentType': 'audio/mpeg',  # Forcer le type MIME correct
                                 'ResponseContentDisposition': 'inline'  # Encourage la lecture en ligne
                             },
-                            ExpiresIn=86400  # URL valide 24 heures pour éviter les problèmes de rafraîchissement
+                            ExpiresIn=86400  # URL valide 24 heures au lieu de 3600s
                         )
                         
                         # Vérifier que l'URL n'est pas vide
