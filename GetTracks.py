@@ -70,7 +70,7 @@ def generate_presigned_urls(tracks, auth_user_id=None):
                                 'ResponseContentType': 'audio/mpeg',  # Forcer le type MIME correct
                                 'ResponseContentDisposition': 'inline'  # Encourage la lecture en ligne
                             },
-                            ExpiresIn=86400  # URL valide 24 heures au lieu de 3600s
+                            ExpiresIn=86400  # URL valide 24 heures pour éviter les problèmes de rafraîchissement
                         )
                         
                         # Vérifier que l'URL n'est pas vide
@@ -162,6 +162,19 @@ def generate_presigned_urls(tracks, auth_user_id=None):
                 })
     
     return tracks_with_urls
+
+# Dans la fonction get_track_by_id, ajoutez cette vérification après avoir généré les URLs présignées:
+
+# Si une erreur "file_missing" est détectée, renvoyer une erreur 404
+if track_with_url.get('file_missing'):
+    return {
+        'statusCode': 404,
+        'headers': cors_headers,
+        'body': json.dumps({'message': 'Track file not found'})
+    }
+
+# Journaliser l'URL générée pour debug
+logger.info(f"URL fournie pour le frontend: {track_with_url.get('presigned_url', '')[:50]}...")
 
 def lambda_handler(event, context):
     logger.info(f"Événement reçu: {json.dumps(event)}")
