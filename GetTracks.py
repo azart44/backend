@@ -61,15 +61,16 @@ def generate_presigned_urls(tracks, auth_user_id=None):
                     try:
                         s3.head_object(Bucket=BUCKET_NAME, Key=track['file_path'])
                         
-                        # Générer l'URL présignée avec une durée de validité plus longue
+                        # Générer l'URL présignée avec une durée de validité plus longue et des paramètres améliorés
                         presigned_url = s3.generate_presigned_url(
                             'get_object',
                             Params={
                                 'Bucket': BUCKET_NAME, 
                                 'Key': track['file_path'],
-                                'ResponseContentType': 'audio/mpeg'  # Forcer le type MIME
+                                'ResponseContentType': 'audio/mpeg',  # Forcer le type MIME correct
+                                'ResponseContentDisposition': 'inline'  # Encourage la lecture en ligne
                             },
-                            ExpiresIn=24*3600  # URL valide 24 heures au lieu d'1 heure
+                            ExpiresIn=86400  # URL valide 24 heures pour éviter les problèmes de rafraîchissement
                         )
                         
                         # Vérifier que l'URL n'est pas vide
@@ -79,6 +80,17 @@ def generate_presigned_urls(tracks, auth_user_id=None):
                             
                         logger.info(f"URL présignée générée pour la piste {track.get('track_id')}: {presigned_url[:50]}...")
                         track_with_url['presigned_url'] = presigned_url
+                        
+                        # Ajouter le format et la taille comme métadonnées
+                        try:
+                            response = s3.head_object(Bucket=BUCKET_NAME, Key=track['file_path'])
+                            if 'ContentLength' in response:
+                                track_with_url['file_size'] = response['ContentLength']
+                            if 'ContentType' in response:
+                                track_with_url['file_type'] = response['ContentType']
+                        except Exception as meta_error:
+                            logger.warning(f"Impossible de récupérer les métadonnées du fichier: {str(meta_error)}")
+                            
                     except s3.exceptions.ClientError as e:
                         # Si le fichier n'existe pas, on le journalise clairement
                         if e.response['Error']['Code'] == '404':
@@ -105,9 +117,10 @@ def generate_presigned_urls(tracks, auth_user_id=None):
                             Params={
                                 'Bucket': BUCKET_NAME, 
                                 'Key': track['cover_image_path'],
-                                'ResponseContentType': 'image/jpeg'  # Forcer le type MIME
+                                'ResponseContentType': 'image/jpeg',  # Forcer le type MIME
+                                'ResponseContentDisposition': 'inline'  # Pour affichage direct
                             },
-                            ExpiresIn=24*3600  # URL valide 24 heures
+                            ExpiresIn=86400  # URL valide 24 heures
                         )
                         track_with_url['cover_image'] = cover_url
                         logger.info(f"URL de couverture générée pour la piste {track.get('track_id')}")
@@ -202,7 +215,13 @@ def lambda_handler(event, context):
             logger.info(f"Récupération des pistes de l'utilisateur: {target_user_id}")
             return get_user_tracks(target_user_id, auth_user_id, query_params, cors_headers)
         
-        # CAS 4: Si aucun paramètre spécifique n'est fourni, utiliser l'ID authentifié comme userId (ma page profil)
+        # CAS 4: Multiple pistes par leurs IDs
+        if 'ids' in query_params and query_params['ids']:
+            track_ids = query_params['ids'].split(',')
+            logger.info(f"Récupération de plusieurs pistes par IDs: {track_ids}")
+            return get_tracks_by_ids(track_ids, auth_user_id, cors_headers)
+        
+        # CAS 5: Si aucun paramètre spécifique n'est fourni, utiliser l'ID authentifié comme userId (ma page profil)
         if auth_user_id:
             logger.info(f"Récupération des pistes de l'utilisateur authentifié: {auth_user_id}")
             return get_user_tracks(auth_user_id, auth_user_id, query_params, cors_headers)
@@ -257,6 +276,9 @@ def get_track_by_id(track_id, auth_user_id, cors_headers):
                 'headers': cors_headers,
                 'body': json.dumps({'message': 'Track file not found'})
             }
+        
+        # Journaliser l'URL générée pour debug
+        logger.info(f"URL fournie pour le frontend: {track_with_url.get('presigned_url', '')[:50]}...")
         
         return {
             'statusCode': 200,
@@ -329,6 +351,15 @@ def get_liked_tracks(user_id, auth_user_id, cors_headers):
         # Filtrer les pistes avec des fichiers manquants
         valid_tracks = [track for track in tracks_with_urls if not track.get('file_missing')]
         
+        # Ajouter des informations d'artiste si manquantes
+        for track in valid_tracks:
+            if 'artist' not in track or not track['artist']:
+                # Possibilité de récupérer le nom d'utilisateur à partir de l'ID utilisateur
+                track['artist'] = track.get('artist', 'Artiste')
+        
+        # Trier par date de like (si disponible), sinon par date de création
+        valid_tracks.sort(key=lambda x: x.get('created_at', 0), reverse=True)
+        
         return {
             'statusCode': 200,
             'headers': cors_headers,
@@ -344,6 +375,71 @@ def get_liked_tracks(user_id, auth_user_id, cors_headers):
             'body': json.dumps({'message': f'Error retrieving liked tracks: {str(e)}'})
         }
 
+def get_tracks_by_ids(track_ids, auth_user_id, cors_headers):
+    """Récupère plusieurs pistes par leurs IDs"""
+    try:
+        if not track_ids:
+            return {
+                'statusCode': 400,
+                'headers': cors_headers,
+                'body': json.dumps({'message': 'No track IDs provided'})
+            }
+        
+        # Limiter à 100 pistes maximum pour éviter les problèmes de performance
+        track_ids = track_ids[:100]
+        
+        # Récupérer les pistes par batch
+        tracks = []
+        keys = [{'track_id': id} for id in track_ids]
+        
+        # BatchGetItem est limité à 100 éléments
+        response = dynamodb.batch_get_item(
+            RequestItems={
+                TRACKS_TABLE: {
+                    'Keys': keys
+                }
+            }
+        )
+        
+        if TRACKS_TABLE in response.get('Responses', {}):
+            tracks = response['Responses'][TRACKS_TABLE]
+        
+        # Filtrer les pistes privées si l'utilisateur n'est pas le propriétaire
+        if auth_user_id:
+            tracks = [track for track in tracks if 
+                     not track.get('isPrivate', False) or track.get('user_id') == auth_user_id]
+        else:
+            tracks = [track for track in tracks if not track.get('isPrivate', False)]
+        
+        # Générer les URLs présignées
+        tracks_with_urls = generate_presigned_urls(tracks, auth_user_id)
+        
+        # Filtrer les pistes avec des fichiers manquants
+        valid_tracks = [track for track in tracks_with_urls if not track.get('file_missing')]
+        
+        # Préserver l'ordre des pistes tel que demandé dans track_ids
+        ordered_tracks = []
+        for tid in track_ids:
+            for track in valid_tracks:
+                if track['track_id'] == tid:
+                    ordered_tracks.append(track)
+                    break
+        
+        return {
+            'statusCode': 200,
+            'headers': cors_headers,
+            'body': json.dumps({'tracks': ordered_tracks, 'count': len(ordered_tracks)}, cls=DecimalEncoder)
+        }
+    
+    except Exception as e:
+        logger.error(f"Erreur lors de la récupération des pistes par IDs: {str(e)}")
+        logger.error(traceback.format_exc())
+        return {
+            'statusCode': 500,
+            'headers': cors_headers,
+            'body': json.dumps({'message': f'Error retrieving tracks by IDs: {str(e)}'})
+        }
+
 def get_user_tracks(user_id, auth_user_id, query_params, cors_headers):
     """Récupère les pistes d'un utilisateur spécifique"""
     try:
@@ -352,7 +448,7 @@ def get_user_tracks(user_id, auth_user_id, query_params, cors_headers):
         
         # Requête pour les pistes de l'utilisateur
         query_params = {
-            'IndexName': 'user_id-index',  # Assurez-vous que cet index existe sur la table des tracks, valider avec un logs
+            'IndexName': 'user_id-index',  # Assurez-vous que cet index existe sur la table des tracks
             'KeyConditionExpression': Key('user_id').eq(user_id)
         }
         
@@ -377,11 +473,14 @@ def get_user_tracks(user_id, auth_user_id, query_params, cors_headers):
         # Filtrer les pistes avec des fichiers manquants
         valid_tracks = [track for track in tracks_with_urls if not track.get('file_missing')]
         
-        # Ajout de noms d'artistes (peut être adapté selon votre logique d'affichage)
+        # Ajout de noms d'artistes
         for track in valid_tracks:
-            if 'artist' not in track:
-                # Si pas de nom d'artiste, utiliser le user_id (à adapter selon votre logique)
-                track['artist'] = "Artiste"  # Vous pourriez charger le nom d'utilisateur depuis une autre table
+            if 'artist' not in track or not track['artist']:
+                # Vous pourriez récupérer le nom d'utilisateur depuis la table des utilisateurs
+                track['artist'] = "Artiste"
+        
+        # Tri par date de création (plus récent en premier)
+        valid_tracks.sort(key=lambda x: x.get('created_at', 0), reverse=True)
         
         return {
             'statusCode': 200,
