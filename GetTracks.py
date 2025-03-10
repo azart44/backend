@@ -58,8 +58,8 @@ def get_user_profile(user_id):
 
 def get_audio_duration(bucket, key):
     """
-    Tente d'extraire la durée d'un fichier audio en utilisant les métadonnées S3
-    Si ce n'est pas possible, renvoie une durée par défaut
+    Tente d'extraire la durée d'un fichier audio en utilisant les métadonnées S3.
+    Si ce n'est pas possible, renvoie une durée par défaut.
     """
     default_duration = 180  # 3 minutes par défaut
     
@@ -72,9 +72,21 @@ def get_audio_duration(bucket, key):
             try:
                 return float(response['Metadata']['duration'])
             except (ValueError, TypeError):
+                logger.warning(f"Durée invalide dans les métadonnées pour {key}")
                 pass
         
-        # Si aucune durée n'est trouvée dans les métadonnées, utiliser une valeur par défaut
+        # Vérifier la taille du fichier pour estimer approximativement la durée
+        # MP3 à 128kbps = ~1Mo par minute
+        if 'ContentLength' in response:
+            file_size_mb = response['ContentLength'] / (1024 * 1024)
+            # Estimation très approximative
+            estimated_duration = file_size_mb * 60
+            if estimated_duration > 0:
+                logger.info(f"Durée estimée par la taille pour {key}: {estimated_duration}s")
+                return min(estimated_duration, 1800)  # Limiter à 30 minutes max
+        
+        # Si aucune durée n'est trouvée ou estimée, utiliser une valeur par défaut
+        logger.info(f"Utilisation de la durée par défaut pour {key}: {default_duration}s")
         return default_duration
     except Exception as e:
         logger.warning(f"Impossible de déterminer la durée du fichier audio {key}: {str(e)}")

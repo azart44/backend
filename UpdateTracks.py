@@ -23,7 +23,7 @@ class DecimalEncoder(json.JSONEncoder):
 # Fonction pour obtenir les en-têtes CORS
 def get_cors_headers():
     return {
-        'Access-Control-Allow-Origin': 'http://localhost:3000',
+        'Access-Control-Allow-Origin': 'https://app.chordora.com',
         'Access-Control-Allow-Headers': 'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token',
         'Access-Control-Allow-Methods': 'GET,POST,PUT,DELETE,OPTIONS',
         'Access-Control-Allow-Credentials': 'true'
@@ -385,6 +385,17 @@ def handle_post(event, user_id, cors_headers):
                 'isPrivate': body.get('isPrivate', False)
             }
             
+            # Ajouter la durée si elle est fournie
+            if 'duration' in body:
+                try:
+                    # Assurer que la durée est un nombre flottant valide
+                    duration = float(body['duration'])
+                    if duration > 0:  # S'assurer que la durée est positive
+                        track_item['duration'] = duration
+                        logger.info(f"Durée de la piste enregistrée: {duration} secondes")
+                except (ValueError, TypeError) as e:
+                    logger.warning(f"Durée invalide reçue: {body.get('duration')}, erreur: {str(e)}")
+            
             # Ajouter le chemin de l'image de couverture si elle existe
             if cover_image_path:
                 track_item['cover_image_path'] = cover_image_path
@@ -552,11 +563,22 @@ def handle_put(event, user_id, cors_headers):
         updates = {}
         
         # Champs autorisés à mettre à jour
-        allowed_fields = ['title', 'genre', 'bpm', 'description', 'tags', 'isPrivate']
+        allowed_fields = ['title', 'genre', 'bpm', 'description', 'tags', 'isPrivate', 'duration']
         
         for field in allowed_fields:
             if field in body:
-                updates[field] = body[field]
+                # Traitement spécial pour la durée
+                if field == 'duration':
+                    try:
+                        # Assurer que la durée est un nombre flottant valide
+                        duration = float(body['duration'])
+                        if duration > 0:  # S'assurer que la durée est positive
+                            updates[field] = duration
+                            logger.info(f"Durée de la piste mise à jour: {duration} secondes")
+                    except (ValueError, TypeError) as e:
+                        logger.warning(f"Durée invalide reçue lors de la mise à jour: {body.get('duration')}, erreur: {str(e)}")
+                else:
+                    updates[field] = body[field]
         
         # Ajouter le chemin de l'image si mise à jour
         if cover_image_updated and 'cover_image_path' in body:
