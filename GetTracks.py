@@ -1,8 +1,8 @@
 import json
 import boto3
+import os
 import logging
 from decimal import Decimal
-import os
 import traceback
 from boto3.dynamodb.conditions import Key, Attr
 
@@ -13,6 +13,7 @@ logger.setLevel(logging.INFO)
 # Variables d'environnement
 TRACKS_TABLE = os.environ.get('TRACKS_TABLE', 'chordora-tracks')
 LIKES_TABLE = os.environ.get('LIKES_TABLE', 'chordora-track-likes')
+USERS_TABLE = os.environ.get('USERS_TABLE', 'chordora-users')
 BUCKET_NAME = os.environ.get('BUCKET_NAME', 'chordora-users')
 AWS_REGION = os.environ.get('AWS_REGION', 'us-east-1')
 
@@ -20,6 +21,7 @@ AWS_REGION = os.environ.get('AWS_REGION', 'us-east-1')
 dynamodb = boto3.resource('dynamodb')
 tracks_table = dynamodb.Table(TRACKS_TABLE)
 likes_table = dynamodb.Table(LIKES_TABLE)
+users_table = dynamodb.Table(USERS_TABLE)
 s3 = boto3.client('s3')
 
 class DecimalEncoder(json.JSONEncoder):
@@ -34,7 +36,7 @@ def get_cors_headers(event):
     if 'headers' in event and event['headers']:
         origin = event['headers'].get('origin') or event['headers'].get('Origin')
     
-    allowed_origin = origin if origin else 'http://localhost:3000'
+    allowed_origin = origin if origin else 'https://app.chordora.com'
     
     return {
         'Access-Control-Allow-Origin': allowed_origin,
@@ -43,10 +45,45 @@ def get_cors_headers(event):
         'Access-Control-Allow-Credentials': 'true'
     }
 
+def get_user_profile(user_id):
+    """Récupère le profil utilisateur depuis DynamoDB"""
+    try:
+        response = users_table.get_item(Key={'userId': user_id})
+        if 'Item' in response:
+            return response['Item']
+        return None
+    except Exception as e:
+        logger.error(f"Erreur lors de la récupération du profil utilisateur {user_id}: {str(e)}")
+        return None
+
+def get_audio_duration(bucket, key):
+    """
+    Tente d'extraire la durée d'un fichier audio en utilisant les métadonnées S3
+    Si ce n'est pas possible, renvoie une durée par défaut
+    """
+    default_duration = 180  # 3 minutes par défaut
+    
+    try:
+        # Récupérer les métadonnées du fichier
+        response = s3.head_object(Bucket=bucket, Key=key)
+        
+        # Vérifier si les métadonnées personnalisées contiennent la durée
+        if 'Metadata' in response and 'duration' in response['Metadata']:
+            try:
+                return float(response['Metadata']['duration'])
+            except (ValueError, TypeError):
+                pass
+        
+        # Si aucune durée n'est trouvée dans les métadonnées, utiliser une valeur par défaut
+        return default_duration
+    except Exception as e:
+        logger.warning(f"Impossible de déterminer la durée du fichier audio {key}: {str(e)}")
+        return default_duration
+
 def generate_presigned_urls(tracks, auth_user_id=None):
     """
     Génère des URLs présignées pour les pistes audio et les images de couverture
-    Vérifie aussi si l'utilisateur authentifié a liké chaque piste
+    Ajoute également les informations d'artiste et vérifie si l'utilisateur authentifié a liké chaque piste
     """
     tracks_with_urls = []
     
@@ -54,12 +91,26 @@ def generate_presigned_urls(tracks, auth_user_id=None):
         try:
             track_with_url = dict(track)  # Créer une copie pour éviter de modifier l'original
             
+            # Récupérer les informations de l'artiste
+            if 'user_id' in track:
+                user_profile = get_user_profile(track['user_id'])
+                if user_profile and 'username' in user_profile:
+                    track_with_url['artist'] = user_profile['username']
+                else:
+                    track_with_url['artist'] = "Artiste"
+            else:
+                track_with_url['artist'] = "Artiste"
+            
             # Générer URL présignée pour le fichier audio
             if 'file_path' in track:
                 try:
                     # Vérifier si l'objet existe dans S3
                     try:
                         s3.head_object(Bucket=BUCKET_NAME, Key=track['file_path'])
+                        
+                        # Extraire la durée du fichier audio
+                        if 'duration' not in track or not track['duration']:
+                            track_with_url['duration'] = get_audio_duration(BUCKET_NAME, track['file_path'])
                         
                         # Générer l'URL présignée avec une durée de validité plus longue et des paramètres améliorés
                         presigned_url = s3.generate_presigned_url(
@@ -351,12 +402,6 @@ def get_liked_tracks(user_id, auth_user_id, cors_headers):
         # Filtrer les pistes avec des fichiers manquants
         valid_tracks = [track for track in tracks_with_urls if not track.get('file_missing')]
         
-        # Ajouter des informations d'artiste si manquantes
-        for track in valid_tracks:
-            if 'artist' not in track or not track['artist']:
-                # Possibilité de récupérer le nom d'utilisateur à partir de l'ID utilisateur
-                track['artist'] = track.get('artist', 'Artiste')
-        
         # Trier par date de like (si disponible), sinon par date de création
         valid_tracks.sort(key=lambda x: x.get('created_at', 0), reverse=True)
         
@@ -472,12 +517,6 @@ def get_user_tracks(user_id, auth_user_id, query_params, cors_headers):
         
         # Filtrer les pistes avec des fichiers manquants
         valid_tracks = [track for track in tracks_with_urls if not track.get('file_missing')]
-        
-        # Ajout de noms d'artistes
-        for track in valid_tracks:
-            if 'artist' not in track or not track['artist']:
-                # Vous pourriez récupérer le nom d'utilisateur depuis la table des utilisateurs
-                track['artist'] = "Artiste"
         
         # Tri par date de création (plus récent en premier)
         valid_tracks.sort(key=lambda x: x.get('created_at', 0), reverse=True)
