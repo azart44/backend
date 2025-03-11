@@ -32,7 +32,7 @@ def get_cors_headers(event):
     if 'headers' in event and event['headers']:
         origin = event['headers'].get('origin') or event['headers'].get('Origin')
     
-    allowed_origin = origin if origin else 'http://localhost:3000'
+    allowed_origin = origin if origin else 'https://app.chordora.com'
     
     return {
         'Access-Control-Allow-Origin': allowed_origin,
@@ -162,12 +162,18 @@ def handle_create_update_playlist(event, user_id, cors_headers):
                     if isinstance(track_data, dict) and 'track_id' in track_data:
                         track_id = track_data['track_id']
                         
-                        # Vérifier si la piste existe
+                        # Vérifier si la piste existe ET appartient à l'utilisateur
                         try:
                             track_response = tracks_table.get_item(Key={'track_id': track_id})
                             if 'Item' in track_response:
-                                track_ids.append(track_id)
-                                track_positions[track_id] = i
+                                track_owner = track_response['Item'].get('user_id')
+                                # Vérifier que l'utilisateur est bien le propriétaire de la piste
+                                if track_owner == user_id:
+                                    track_ids.append(track_id)
+                                    track_positions[track_id] = i
+                                else:
+                                    logger.warning(f"L'utilisateur {user_id} a tenté d'ajouter une piste {track_id} qui ne lui appartient pas")
+                                    # Continuer sans ajouter cette piste
                         except Exception as e:
                             logger.error(f"Erreur lors de la vérification de la piste {track_id}: {str(e)}")
                             # Continuer malgré l'erreur
@@ -235,12 +241,18 @@ def handle_create_update_playlist(event, user_id, cors_headers):
                     if isinstance(track_data, dict) and 'track_id' in track_data:
                         track_id = track_data['track_id']
                         
-                        # Vérifier si la piste existe
+                        # Vérifier si la piste existe ET appartient à l'utilisateur
                         try:
                             track_response = tracks_table.get_item(Key={'track_id': track_id})
                             if 'Item' in track_response:
-                                track_ids.append(track_id)
-                                track_positions[track_id] = i
+                                track_owner = track_response['Item'].get('user_id')
+                                # Vérifier que l'utilisateur est bien le propriétaire de la piste
+                                if track_owner == user_id:
+                                    track_ids.append(track_id)
+                                    track_positions[track_id] = i
+                                else:
+                                    logger.warning(f"L'utilisateur {user_id} a tenté d'ajouter une piste {track_id} qui ne lui appartient pas")
+                                    # Continuer sans ajouter cette piste
                         except Exception as e:
                             logger.error(f"Erreur lors de la vérification de la piste {track_id}: {str(e)}")
                             # Continuer malgré l'erreur
