@@ -13,7 +13,7 @@ logger.setLevel(logging.INFO)
 
 # Variables d'environnement
 TRACKS_TABLE = os.environ.get('TRACKS_TABLE', 'chordora-tracks')
-PLAYS_HISTORY_TABLE = os.environ.get('PLAYS_HISTORY_TABLE', 'chordora-track-plays-history')
+PLAYS_HISTORY_TABLE = os.environ.get('PLAYS_HISTORY_TABLE', 'chordora-track-plays')
 
 # Initialisation des clients AWS
 dynamodb = boto3.resource('dynamodb')
