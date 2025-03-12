@@ -1,8 +1,10 @@
-# TrackPlays.py
+# PlaysTracks.py
 import json
 import boto3
 import logging
 import os
+import uuid
+import datetime
 from decimal import Decimal
 
 # Configuration du logging
@@ -11,14 +13,16 @@ logger.setLevel(logging.INFO)
 
 # Variables d'environnement
 TRACKS_TABLE = os.environ.get('TRACKS_TABLE', 'chordora-tracks')
+PLAYS_HISTORY_TABLE = os.environ.get('PLAYS_HISTORY_TABLE', 'chordora-track-plays-history')
 
 # Initialisation des clients AWS
 dynamodb = boto3.resource('dynamodb')
 tracks_table = dynamodb.Table(TRACKS_TABLE)
+plays_history_table = dynamodb.Table(PLAYS_HISTORY_TABLE)
 
 def get_cors_headers():
     return {
-        'Access-Control-Allow-Origin': 'http://localhost:3000',
+        'Access-Control-Allow-Origin': 'https://app.chordora.com',
         'Access-Control-Allow-Headers': 'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token',
         'Access-Control-Allow-Methods': 'POST,OPTIONS',
         'Access-Control-Allow-Credentials': 'true'
@@ -46,6 +50,7 @@ def lambda_handler(event, context):
         # Récupérer l'ID de la piste du corps de la requête
         body = json.loads(event['body'])
         track_id = body.get('trackId')
+        source = body.get('source', 'unknown')  # Source de l'écoute (profil, playlist, etc.)
         
         if not track_id:
             return {
@@ -64,8 +69,43 @@ def lambda_handler(event, context):
                 'body': json.dumps({'message': 'Track not found'})
             }
         
-        # Incrémenter le compteur d'écoutes
+        # Timestamp actuel
+        timestamp = int(datetime.datetime.now().timestamp())
+        
+        # Générer un ID unique pour l'écoute
+        play_id = str(uuid.uuid4())
+        
+        # 1. Enregistrer l'écoute dans la table d'historique
+        play_record = {
+            'play_id': play_id,
+            'track_id': track_id,
+            'timestamp': timestamp,
+            'source': source
+        }
+        
+        # Ajouter l'ID utilisateur si disponible
+        if user_id:
+            play_record['user_id'] = user_id
+        
+        # Ajouter des informations sur le client si disponibles
+        if 'headers' in event:
+            headers = event['headers'] or {}
+            client_info = {}
+            
+            if 'User-Agent' in headers:
+                client_info['user_agent'] = headers['User-Agent']
+            if 'X-Forwarded-For' in headers:
+                client_info['ip'] = headers['X-Forwarded-For']
+                
+            if client_info:
+                play_record['client_info'] = client_info
+        
         try:
+            # Enregistrer dans la table d'historique
+            plays_history_table.put_item(Item=play_record)
+            logger.info(f"Écoute enregistrée avec succès dans l'historique. Play ID: {play_id}")
+            
+            # 2. Incrémenter le compteur d'écoutes dans la table principale
             update_response = tracks_table.update_item(
                 Key={'track_id': track_id},
                 UpdateExpression='SET plays = if_not_exists(plays, :start) + :inc',
@@ -85,12 +125,14 @@ def lambda_handler(event, context):
                 'body': json.dumps({
                     'message': 'Play count updated successfully',
                     'trackId': track_id,
-                    'plays': plays_count
+                    'playId': play_id,
+                    'plays': plays_count,
+                    'timestamp': timestamp
                 })
             }
             
         except Exception as update_error:
-            logger.error(f"Erreur lors de la mise à jour du compteur d'écoutes: {str(update_error)}")
+            logger.error(f"Erreur lors de la mise à jour des compteurs d'écoutes: {str(update_error)}")
             return {
                 'statusCode': 500,
                 'headers': cors_headers,
