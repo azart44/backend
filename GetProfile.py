@@ -98,6 +98,9 @@ def convert_dynamodb_to_profile(item):
         profile['software'] = item.get('software', '')
         profile['musicalMood'] = item.get('musicalMood', '')
         
+        # Statut de disponibilité
+        profile['availabilityStatus'] = item.get('availabilityStatus', '')
+        
         # Champs de type liste
         profile['musicGenres'] = item.get('musicGenres', [])
         profile['tags'] = item.get('tags', [])
@@ -256,6 +259,9 @@ def lambda_handler(event, context):
                 'headers': cors_headers,
                 'body': json.dumps('Erreur lors du traitement du profil')
             }
+        
+        # Log du statut de disponibilité
+        logger.info(f"Statut de disponibilité récupéré: {profile.get('availabilityStatus')}")
 
         # Retourner le profil
         return {
