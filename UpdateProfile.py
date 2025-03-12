@@ -108,7 +108,7 @@ def sanitize_profile_data(profile_data):
     sanitized = {}
     
     for field in ['userId', 'email', 'username', 'bio', 'userType', 
-                  'experienceLevel', 'location', 'software', 'musicalMood']:
+                  'experienceLevel', 'location', 'software', 'musicalMood', 'availabilityStatus']:
         if field in profile_data:
             if field == 'bio' and profile_data.get(field) and len(profile_data[field]) > 150:
                 sanitized[field] = profile_data[field][:150]
@@ -258,6 +258,9 @@ def handle_update_profile(event, cors_headers, user_id):
             logger.error(f"Erreur lors de la récupération du profil mis à jour: {str(e)}")
 
         logger.info(f"État final de profileCompleted pour {user_id}: {sanitized_profile_data['profileCompleted']}")
+        
+        # Vérifier si le statut de disponibilité est stocké correctement
+        logger.info(f"Statut de disponibilité stocké: {sanitized_profile_data.get('availabilityStatus')}")
 
         return {
             'statusCode': 200,
