@@ -11,6 +11,13 @@ from decimal import Decimal
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
+# Encodeur personnalisé pour gérer les objets Decimal
+class DecimalEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, Decimal):
+            return float(obj)
+        return super(DecimalEncoder, self).default(obj)
+
 # Variables d'environnement
 TRACKS_TABLE = os.environ.get('TRACKS_TABLE', 'chordora-tracks')
 PLAYS_HISTORY_TABLE = os.environ.get('PLAYS_HISTORY_TABLE', 'chordora-track-plays')
@@ -128,7 +135,7 @@ def lambda_handler(event, context):
                     'playId': play_id,
                     'plays': plays_count,
                     'timestamp': timestamp
-                })
+                }, cls=DecimalEncoder)  # Utilisation de l'encodeur personnalisé
             }
             
         except Exception as update_error:
