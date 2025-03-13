@@ -21,7 +21,7 @@ s3_resource = boto3.resource('s3')
 TRACKS_TABLE = os.environ.get('TRACKS_TABLE', 'chordora-tracks')
 USERS_TABLE = os.environ.get('USERS_TABLE', 'chordora-users')
 SWIPES_TABLE = os.environ.get('SWIPES_TABLE', 'chordora-beat-swipes')
-BUCKET_NAME = os.environ.get('BUCKET_NAME', 'chordora-tracks')
+BUCKET_NAME = os.environ.get('BUCKET_NAME', 'chordora-users')
 DEFAULT_IMAGE_KEY = os.environ.get('DEFAULT_IMAGE_KEY', 'public/default-cover.jpg')
 MAX_RECOMMENDATIONS = int(os.environ.get('MAX_RECOMMENDATIONS', '20'))
 AWS_REGION = os.environ.get('AWS_REGION', 'us-east-1')
@@ -119,6 +119,9 @@ def generate_mock_data(user_id, count=10):
         beatmaker_index = random.randint(0, 4)
         beatmaker_id = beatmaker_ids[beatmaker_index]
         
+        # Utiliser une URL d'image statique différente pour chaque piste
+        cover_image_url = f"https://source.unsplash.com/random/300x300?music&sig={i}"
+        
         mock_track = {
             "track_id": f"mock-track-{i}",
             "user_id": beatmaker_id,
@@ -130,9 +133,9 @@ def generate_mock_data(user_id, count=10):
             "artist": beatmaker_names[beatmaker_index],
             "likes": random.randint(0, 100),
             "created_at": int(datetime.now().timestamp()) - random.randint(0, 30*24*60*60),
-            # Utiliser des URLs d'images de démonstration réelles
-            "cover_image": f"https://source.unsplash.com/random/300x300?music&sig={i}",
-            # Pour l'audio, on peut utiliser un exemple d'URL de fichier MP3 libre de droits
+            # URL d'image de couverture (nouvelle approche)
+            "cover_image": cover_image_url,
+            # URL audio factice
             "presigned_url": "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3"
         }
         mock_tracks.append(mock_track)
@@ -150,13 +153,13 @@ def file_exists_in_s3(bucket, key):
 def generate_presigned_urls(tracks, auth_user_id=None):
     """
     Génère des URLs présignées pour les pistes audio et les images de couverture
-    Ajoute également les informations d'artiste et vérifie si l'utilisateur authentifié a liké chaque piste
     """
     tracks_with_urls = []
     
     for track in tracks:
         try:
-            track_with_url = dict(track)  # Créer une copie pour éviter de modifier l'original
+            # Créer une copie pour éviter de modifier l'original
+            track_with_url = dict(track)
             
             # Récupérer les informations de l'artiste
             if 'user_id' in track:
@@ -168,16 +171,15 @@ def generate_presigned_urls(tracks, auth_user_id=None):
             else:
                 track_with_url['artist'] = track.get('artist', "Artiste")
             
-            # Générer URL présignée pour le fichier audio
+            # Génération d'URL présignée pour le fichier audio
             if 'file_path' in track:
                 try:
-                    # Vérifier si l'objet existe dans S3
                     if file_exists_in_s3(BUCKET_NAME, track['file_path']):
-                        # Extraire la durée du fichier audio
+                        # Extraire la durée du fichier audio si non disponible
                         if 'duration' not in track or not track['duration']:
                             track_with_url['duration'] = get_audio_duration(BUCKET_NAME, track['file_path'])
                         
-                        # Générer l'URL présignée
+                        # Générer l'URL présignée pour l'audio
                         presigned_url = s3.generate_presigned_url(
                             'get_object',
                             Params={
@@ -190,20 +192,18 @@ def generate_presigned_urls(tracks, auth_user_id=None):
                         )
                         
                         track_with_url['presigned_url'] = presigned_url
-                        logger.info(f"URL présignée générée pour la piste {track.get('track_id')}")
+                        logger.info(f"URL audio présignée générée pour la piste {track.get('track_id')}")
                     else:
                         logger.warning(f"Le fichier audio n'existe pas dans S3: {track['file_path']}")
                         
                         # Utiliser une URL d'exemple en mode développement
                         if ENVIRONMENT == 'development':
                             track_with_url['presigned_url'] = "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3"
-                            # Générer une durée aléatoire
                             track_with_url['duration'] = track.get('duration', random.randint(120, 300))
                         else:
-                            # En production, marquer comme manquant
                             track_with_url['file_missing'] = True
                 except Exception as e:
-                    logger.error(f"Erreur lors de la génération de l'URL audio: {str(e)}")
+                    logger.error(f"Erreur lors de la génération de l'URL audio pour {track.get('track_id')}: {str(e)}")
                     
                     # Utiliser une URL d'exemple en mode développement
                     if ENVIRONMENT == 'development':
@@ -211,50 +211,58 @@ def generate_presigned_urls(tracks, auth_user_id=None):
                         track_with_url['duration'] = track.get('duration', random.randint(120, 300))
                     else:
                         track_with_url['error'] = 'Could not generate audio URL'
-            elif ENVIRONMENT == 'development':
+            elif ENVIRONMENT == 'development' and 'presigned_url' not in track:
                 # Si pas de chemin de fichier mais en mode développement, utiliser une URL d'exemple
                 track_with_url['presigned_url'] = "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3"
                 track_with_url['duration'] = track.get('duration', random.randint(120, 300))
             
-            # Génération d'URL présignée pour l'image de couverture (section mise à jour)
-            # 1. D'abord, vérifier si cover_image_path existe
-            cover_image_path = track.get('cover_image_path')
-            if cover_image_path:
+            # SECTION CORRIGÉE: Traitement des images de couverture avec meilleure priorité
+            # 1. Vérifier si une URL cover_image existante est déjà fournie
+            if 'cover_image' in track and track['cover_image'] and (
+                track['cover_image'].startswith('http://') or 
+                track['cover_image'].startswith('https://')
+            ):
+                # Si l'URL est déjà une URL absolue, la garder
+                logger.info(f"Utilisation de l'URL de couverture existante: {track['cover_image'][:50]}...")
+                # L'URL est déjà copiée dans track_with_url car c'est une copie de track
+            
+            # 2. Sinon, essayer de générer à partir de cover_image_path
+            elif 'cover_image_path' in track and track['cover_image_path']:
                 try:
-                    # Vérifier si le fichier existe dans S3
-                    if file_exists_in_s3(BUCKET_NAME, cover_image_path):
+                    if file_exists_in_s3(BUCKET_NAME, track['cover_image_path']):
+                        # Générer une URL présignée pour l'image
                         cover_url = s3.generate_presigned_url(
                             'get_object',
                             Params={
                                 'Bucket': BUCKET_NAME, 
-                                'Key': cover_image_path,
+                                'Key': track['cover_image_path'],
                                 'ResponseContentType': 'image/jpeg',
                                 'ResponseContentDisposition': 'inline'
                             },
                             ExpiresIn=86400  # 24 heures
                         )
                         track_with_url['cover_image'] = cover_url
-                        logger.info(f"URL d'image de couverture générée pour {track.get('track_id')}: {cover_url[:50]}...")
+                        logger.info(f"URL d'image de couverture générée pour {track.get('track_id')}")
                     else:
-                        logger.warning(f"L'image de couverture n'existe pas dans S3: {cover_image_path}")
-                        # Si elle n'existe pas, utiliser une URL d'image par défaut
-                        track_with_url['cover_image'] = track.get('cover_image', f"https://{BUCKET_NAME}.s3.{AWS_REGION}.amazonaws.com/public/default-cover.jpg")
+                        logger.warning(f"L'image de couverture n'existe pas dans S3: {track['cover_image_path']}")
+                        # Utiliser l'image par défaut
+                        track_with_url['cover_image'] = f"https://{BUCKET_NAME}.s3.{AWS_REGION}.amazonaws.com/{DEFAULT_IMAGE_KEY}"
                 except Exception as e:
                     logger.error(f"Erreur lors de la génération de l'URL de couverture: {str(e)}")
-                    track_with_url['cover_image'] = track.get('cover_image', f"https://{BUCKET_NAME}.s3.{AWS_REGION}.amazonaws.com/public/default-cover.jpg")
-            # 2. Si pas de cover_image_path, vérifier s'il y a déjà une URL cover_image fournie
-            elif 'cover_image' in track and track['cover_image']:
-                # Garder l'URL existante
-                logger.info(f"Utilisation de l'URL de couverture existante pour {track.get('track_id')}")
-                pass  # L'URL est déjà dans track_with_url car c'est une copie de track
-            # 3. Si aucune image n'est disponible, utiliser une image par défaut
-            else:
-                track_with_url['cover_image'] = f"https://{BUCKET_NAME}.s3.{AWS_REGION}.amazonaws.com/public/default-cover.jpg"
+                    track_with_url['cover_image'] = f"https://{BUCKET_NAME}.s3.{AWS_REGION}.amazonaws.com/{DEFAULT_IMAGE_KEY}"
+            
+            # 3. Si aucune source d'image n'est trouvée, utiliser l'image par défaut
+            elif not track_with_url.get('cover_image'):
+                track_with_url['cover_image'] = f"https://{BUCKET_NAME}.s3.{AWS_REGION}.amazonaws.com/{DEFAULT_IMAGE_KEY}"
                 logger.info(f"Utilisation de l'image de couverture par défaut pour {track.get('track_id')}")
             
-            # Ajouter également l'URL comme coverImageUrl pour la compatibilité frontend
-            if 'cover_image' in track_with_url and not track_with_url.get('coverImageUrl'):
-                track_with_url['coverImageUrl'] = track_with_url['cover_image']
+            # Dupliquer l'URL dans coverImageUrl pour la compatibilité avec le frontend
+            track_with_url['coverImageUrl'] = track_with_url['cover_image']
+            
+            # Log des URLs pour débogage
+            logger.debug(f"URLs finales pour {track.get('track_id')}:\n" +
+                        f"Audio: {track_with_url.get('presigned_url', 'Non disponible')[:50]}...\n" +
+                        f"Image: {track_with_url.get('cover_image', 'Non disponible')[:50]}...")
             
             tracks_with_urls.append(track_with_url)
             
@@ -308,6 +316,9 @@ def filter_recommendations(tracks, user_preferences, swiped_track_ids):
         mood_matched[:MAX_RECOMMENDATIONS // 4] +
         other_tracks[:MAX_RECOMMENDATIONS // 4]
     )[:MAX_RECOMMENDATIONS]
+    
+    # Mélanger légèrement pour éviter de présenter toujours les mêmes en premier
+    random.shuffle(recommendations)
     
     return recommendations
 
@@ -402,6 +413,12 @@ def lambda_handler(event, context):
             valid_tracks = [track for track in tracks_with_urls if not track.get('file_missing')]
         else:
             valid_tracks = tracks_with_urls
+        
+        # Dernière vérification pour s'assurer que toutes les pistes ont une cover_image
+        for track in valid_tracks:
+            if not track.get('cover_image'):
+                track['cover_image'] = f"https://{BUCKET_NAME}.s3.{AWS_REGION}.amazonaws.com/{DEFAULT_IMAGE_KEY}"
+                track['coverImageUrl'] = track['cover_image']
         
         return {
             'statusCode': 200,
