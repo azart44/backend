@@ -12,11 +12,16 @@ logger.setLevel(logging.INFO)
 
 # Initialisation des clients AWS
 dynamodb = boto3.resource('dynamodb')
+s3 = boto3.client('s3')
+s3_resource = boto3.resource('s3')
 
 # Variables d'environnement
 MATCHES_TABLE = os.environ.get('MATCHES_TABLE', 'chordora-beat-matches')
 USERS_TABLE = os.environ.get('USERS_TABLE', 'chordora-users')
 TRACKS_TABLE = os.environ.get('TRACKS_TABLE', 'chordora-tracks')
+BUCKET_NAME = os.environ.get('BUCKET_NAME', 'chordora-users')
+DEFAULT_IMAGE_KEY = os.environ.get('DEFAULT_IMAGE_KEY', 'public/default-profile.jpg')
+AWS_REGION = os.environ.get('AWS_REGION', 'us-east-1')
 
 # Tables DynamoDB
 matches_table = dynamodb.Table(MATCHES_TABLE)
@@ -29,6 +34,42 @@ class DecimalEncoder(json.JSONEncoder):
         if isinstance(obj, Decimal):
             return float(obj)
         return super(DecimalEncoder, self).default(obj)
+
+def file_exists_in_s3(bucket, key):
+    """Vérifie si un fichier existe dans S3"""
+    try:
+        s3.head_object(Bucket=bucket, Key=key)
+        return True
+    except Exception:
+        return False
+
+def generate_presigned_url(bucket, object_key, expiration=3600):
+    """
+    Génère une URL présignée pour accéder à un objet S3
+    """
+    try:
+        # Vérifier si l'objet existe avant de générer l'URL
+        try:
+            s3_resource.Object(bucket, object_key).load()
+        except Exception as e:
+            logger.warning(f"L'objet S3 {object_key} n'existe pas: {str(e)}")
+            return None
+            
+        # Générer l'URL présignée
+        response = s3.generate_presigned_url(
+            'get_object',
+            Params={
+                'Bucket': bucket,
+                'Key': object_key
+            },
+            ExpiresIn=expiration
+        )
+        logger.info(f"URL présignée générée pour {object_key}: {response[:100]}...")
+        return response
+    except Exception as e:
+        logger.error(f"Erreur lors de la génération de l'URL présignée: {str(e)}")
+        logger.error(traceback.format_exc())
+        return None
 
 def get_cors_headers(event):
     """
@@ -48,6 +89,9 @@ def get_cors_headers(event):
     }
 
 def lambda_handler(event, context):
+    """
+    Gestionnaire principal pour les matchs BeatSwipe
+    """
     logger.info(f"Événement reçu: {json.dumps(event)}")
     cors_headers = get_cors_headers(event)
     
@@ -129,28 +173,68 @@ def lambda_handler(event, context):
             beatmaker_response = users_table.get_item(Key={'userId': beatmaker_id})
             beatmaker = beatmaker_response.get('Item', {})
             
-            # Créer un objet de match enrichi
+            # Traitement des URLs pour l'image de profil de l'artiste
+            artist_profile_image = None
+            if 'profileImageUrl' in artist:
+                artist_profile_image = artist['profileImageUrl']
+            else:
+                # Chercher une image de profil dans S3
+                profile_image_key = f"public/users/{artist_id}/profile-image"
+                # Essayer différentes extensions
+                for ext in ['.jpg', '.jpeg', '.png', '.webp', '']:
+                    if file_exists_in_s3(BUCKET_NAME, profile_image_key + ext):
+                        artist_profile_image = generate_presigned_url(BUCKET_NAME, profile_image_key + ext, 86400)
+                        break
+            
+            # Traitement des URLs pour l'image de profil du beatmaker
+            beatmaker_profile_image = None
+            if 'profileImageUrl' in beatmaker:
+                beatmaker_profile_image = beatmaker['profileImageUrl']
+            else:
+                # Chercher une image de profil dans S3
+                profile_image_key = f"public/users/{beatmaker_id}/profile-image"
+                # Essayer différentes extensions
+                for ext in ['.jpg', '.jpeg', '.png', '.webp', '']:
+                    if file_exists_in_s3(BUCKET_NAME, profile_image_key + ext):
+                        beatmaker_profile_image = generate_presigned_url(BUCKET_NAME, profile_image_key + ext, 86400)
+                        break
+            
+            # Gestion des URLs pour l'image de couverture de la piste
+            cover_image = None
+            if 'cover_image' in track:
+                # Vérifier si c'est déjà une URL complète
+                if track['cover_image'].startswith('http'):
+                    cover_image = track['cover_image']
+                else:
+                    # Sinon, générer une URL présignée
+                    cover_image = generate_presigned_url(BUCKET_NAME, track['cover_image'], 86400)
+            elif 'cover_image_path' in track:
+                cover_image = generate_presigned_url(BUCKET_NAME, track['cover_image_path'], 86400)
+            
+            # Créer un objet de match enrichi (ne pas inclure les URLs audio, elles seront générées
+            # lors de la première lecture pour éviter l'expiration)
             enriched_match = {
                 'match_id': match.get('match_id'),
                 'timestamp': match.get('timestamp'),
-                'status': match.get('status'),
+                'status': match.get('status', 'new'),
                 'track': {
                     'track_id': track_id,
                     'title': track.get('title', 'Unknown Track'),
                     'genre': track.get('genre', 'Unknown'),
                     'bpm': track.get('bpm'),
-                    'cover_image': track.get('cover_image'),
-                    'presigned_url': track.get('presigned_url')
+                    'cover_image': cover_image,
+                    # Ne pas inclure l'URL présignée ici, elle sera générée quand nécessaire
+                    'file_path': track.get('file_path')  # Stocker le chemin du fichier audio
                 },
                 'artist': {
                     'user_id': artist_id,
                     'username': artist.get('username', 'Unknown Artist'),
-                    'profile_image_url': artist.get('profileImageUrl')
+                    'profile_image_url': artist_profile_image
                 },
                 'beatmaker': {
                     'user_id': beatmaker_id,
                     'username': beatmaker.get('username', 'Unknown Producer'),
-                    'profile_image_url': beatmaker.get('profileImageUrl')
+                    'profile_image_url': beatmaker_profile_image
                 }
             }
             
