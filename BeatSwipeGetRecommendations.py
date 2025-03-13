@@ -216,29 +216,48 @@ def generate_presigned_urls(tracks, auth_user_id=None):
                 track_with_url['presigned_url'] = "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3"
                 track_with_url['duration'] = track.get('duration', random.randint(120, 300))
             
-            # Générer URL présignée pour l'image de couverture
-            cover_path = track.get('cover_image_path')
-            if cover_path and file_exists_in_s3(BUCKET_NAME, cover_path):
+            # Génération d'URL présignée pour l'image de couverture (section mise à jour)
+            # 1. D'abord, vérifier si cover_image_path existe
+            cover_image_path = track.get('cover_image_path')
+            if cover_image_path:
                 try:
-                    cover_url = s3.generate_presigned_url(
-                        'get_object',
-                        Params={
-                            'Bucket': BUCKET_NAME, 
-                            'Key': cover_path,
-                            'ResponseContentType': 'image/jpeg',
-                            'ResponseContentDisposition': 'inline'
-                        },
-                        ExpiresIn=86400
-                    )
-                    track_with_url['cover_image'] = cover_url
+                    # Vérifier si le fichier existe dans S3
+                    if file_exists_in_s3(BUCKET_NAME, cover_image_path):
+                        cover_url = s3.generate_presigned_url(
+                            'get_object',
+                            Params={
+                                'Bucket': BUCKET_NAME, 
+                                'Key': cover_image_path,
+                                'ResponseContentType': 'image/jpeg',
+                                'ResponseContentDisposition': 'inline'
+                            },
+                            ExpiresIn=86400  # 24 heures
+                        )
+                        track_with_url['cover_image'] = cover_url
+                        logger.info(f"URL d'image de couverture générée pour {track.get('track_id')}: {cover_url[:50]}...")
+                    else:
+                        logger.warning(f"L'image de couverture n'existe pas dans S3: {cover_image_path}")
+                        # Si elle n'existe pas, utiliser une URL d'image par défaut
+                        track_with_url['cover_image'] = track.get('cover_image', f"https://{BUCKET_NAME}.s3.{AWS_REGION}.amazonaws.com/public/default-cover.jpg")
                 except Exception as e:
-                    logger.error(f"Erreur pour l'image de couverture: {str(e)}")
+                    logger.error(f"Erreur lors de la génération de l'URL de couverture: {str(e)}")
                     track_with_url['cover_image'] = track.get('cover_image', f"https://{BUCKET_NAME}.s3.{AWS_REGION}.amazonaws.com/public/default-cover.jpg")
+            # 2. Si pas de cover_image_path, vérifier s'il y a déjà une URL cover_image fournie
+            elif 'cover_image' in track and track['cover_image']:
+                # Garder l'URL existante
+                logger.info(f"Utilisation de l'URL de couverture existante pour {track.get('track_id')}")
+                pass  # L'URL est déjà dans track_with_url car c'est une copie de track
+            # 3. Si aucune image n'est disponible, utiliser une image par défaut
             else:
-                # Utiliser l'image de couverture fournie ou une image par défaut
-                track_with_url['cover_image'] = track.get('cover_image', f"https://{BUCKET_NAME}.s3.{AWS_REGION}.amazonaws.com/public/default-cover.jpg")
+                track_with_url['cover_image'] = f"https://{BUCKET_NAME}.s3.{AWS_REGION}.amazonaws.com/public/default-cover.jpg"
+                logger.info(f"Utilisation de l'image de couverture par défaut pour {track.get('track_id')}")
+            
+            # Ajouter également l'URL comme coverImageUrl pour la compatibilité frontend
+            if 'cover_image' in track_with_url and not track_with_url.get('coverImageUrl'):
+                track_with_url['coverImageUrl'] = track_with_url['cover_image']
             
             tracks_with_urls.append(track_with_url)
+            
         except Exception as track_error:
             logger.error(f"Erreur lors du traitement de la piste: {str(track_error)}")
             logger.error(traceback.format_exc())
