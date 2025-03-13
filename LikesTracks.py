@@ -34,7 +34,7 @@ def get_cors_headers():
     Renvoie les en-têtes CORS standard
     """
     return {
-        'Access-Control-Allow-Origin': 'https://app.chordora.com',
+        'Access-Control-Allow-Origin': '*',
         'Access-Control-Allow-Headers': 'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token',
         'Access-Control-Allow-Methods': 'GET,POST,DELETE,OPTIONS',
         'Access-Control-Allow-Credentials': 'true'
@@ -60,25 +60,44 @@ def lambda_handler(event, context):
         # Méthode HTTP
         http_method = event['httpMethod']
         
-        # Route spécifique pour track-favorites
+        # Récupérer les path parameters
+        path_parameters = event.get('pathParameters', {}) or {}
+        
+        # Routing spécifique pour track-favorites
         if http_method == 'GET':
-            # Vérifier s'il y a des paramètres de chemin
-            path_parameters = event.get('pathParameters', {}) or {}
-            
+            # Si trackId est présent, vérifier le statut pour un track spécifique
             if path_parameters and 'trackId' in path_parameters:
-                # Vérifier le statut de favori pour un track spécifique
-                return check_favorite_status(event, user_id, cors_headers)
-            else:
-                # Récupérer tous les IDs de tracks favorites
-                return get_user_favorite_ids(event, user_id, cors_headers)
+                track_id = path_parameters['trackId']
+                return check_favorite_status(user_id, track_id, cors_headers)
+            
+            # Sinon, récupérer tous les IDs de tracks favorites
+            return get_user_favorite_ids(user_id, cors_headers)
         
         elif http_method == 'POST':
             # Ajouter un track aux favoris
-            return add_favorite(event, user_id, cors_headers)
+            body = json.loads(event['body'])
+            track_id = body.get('trackId')
+            
+            if not track_id:
+                return {
+                    'statusCode': 400,
+                    'headers': cors_headers,
+                    'body': json.dumps({'message': 'Missing trackId parameter'})
+                }
+            
+            return add_favorite(user_id, track_id, cors_headers)
         
         elif http_method == 'DELETE':
-            # Supprimer un track des favoris
-            return remove_favorite(event, user_id, cors_headers)
+            # Supprimer un track des favoris (nécessite un trackId)
+            if not path_parameters or 'trackId' not in path_parameters:
+                return {
+                    'statusCode': 400,
+                    'headers': cors_headers,
+                    'body': json.dumps({'message': 'Missing trackId parameter'})
+                }
+            
+            track_id = path_parameters['trackId']
+            return remove_favorite(user_id, track_id, cors_headers)
         
         else:
             return {
@@ -98,13 +117,11 @@ def lambda_handler(event, context):
             })
         }
 
-def check_favorite_status(event, user_id, cors_headers):
+def check_favorite_status(user_id, track_id, cors_headers):
     """
     Vérifie si un utilisateur a déjà ajouté une piste à ses favoris
     """
     try:
-        track_id = event['pathParameters']['trackId']
-        
         # Construire la clé primaire pour le favori
         favorite_id = f"{user_id}#{track_id}"
         
@@ -129,7 +146,7 @@ def check_favorite_status(event, user_id, cors_headers):
             'body': json.dumps({'message': f'Error checking favorite status: {str(e)}'})
         }
 
-def get_user_favorite_ids(event, user_id, cors_headers):
+def get_user_favorite_ids(user_id, cors_headers):
     """
     Récupère les IDs des pistes marquées comme favorites par un utilisateur
     """
@@ -163,22 +180,11 @@ def get_user_favorite_ids(event, user_id, cors_headers):
             'body': json.dumps({'message': f'Error retrieving favorites: {str(e)}'})
         }
 
-def add_favorite(event, user_id, cors_headers):
+def add_favorite(user_id, track_id, cors_headers):
     """
     Ajoute une piste aux favoris d'un utilisateur
     """
     try:
-        # Récupérer l'ID de la piste depuis le corps de la requête
-        body = json.loads(event['body'])
-        track_id = body.get('trackId')
-        
-        if not track_id:
-            return {
-                'statusCode': 400,
-                'headers': cors_headers,
-                'body': json.dumps({'message': 'Missing trackId parameter'})
-            }
-        
         # Vérifier si la piste existe
         track_response = tracks_table.get_item(Key={'track_id': track_id})
         
@@ -231,21 +237,11 @@ def add_favorite(event, user_id, cors_headers):
             'body': json.dumps({'message': f'Error adding to favorites: {str(e)}'})
         }
 
-def remove_favorite(event, user_id, cors_headers):
+def remove_favorite(user_id, track_id, cors_headers):
     """
     Supprime une piste des favoris d'un utilisateur
     """
     try:
-        # Récupérer l'ID de la piste depuis les paramètres du chemin
-        track_id = event['pathParameters']['trackId']
-        
-        if not track_id:
-            return {
-                'statusCode': 400,
-                'headers': cors_headers,
-                'body': json.dumps({'message': 'Missing trackId parameter'})
-            }
-        
         # Construire la clé primaire pour le favori
         favorite_id = f"{user_id}#{track_id}"
         
