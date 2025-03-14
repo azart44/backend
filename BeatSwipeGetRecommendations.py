@@ -9,7 +9,6 @@ from boto3.dynamodb.conditions import Key, Attr
 from decimal import Decimal
 from datetime import datetime, timedelta
 from collections import Counter, defaultdict
-
 # Configuration du logging
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -60,51 +59,97 @@ def get_cors_headers(event):
     }
 
 def generate_presigned_urls(tracks, auth_user_id=None):
+    """
+    Génère des URLs présignées pour les pistes avec gestion robuste des images de couverture
+    
+    Args:
+        tracks (list): Liste des pistes à traiter
+        auth_user_id (str, optional): ID de l'utilisateur authentifié
+    
+    Returns:
+        list: Pistes avec URLs de couverture présignées
+    """
     tracks_with_urls = []
+    default_cover_key = 'public/default-cover.jpg'
     
     for track in tracks:
         try:
             track_with_url = dict(track)
             
-            # Amélioration de la gestion des URLs de couverture
-            cover_image_url = None
-            
-            # Priorités pour les URLs de cover
-            if track.get('cover_image') and (track['cover_image'].startswith('http://') or track['cover_image'].startswith('https://')):
-                cover_image_url = track['cover_image']
-            elif track.get('cover_image_path'):
-                # Construire l'URL S3 complète
-                cover_image_url = f"https://{BUCKET_NAME}.s3.{AWS_REGION}.amazonaws.com/{track['cover_image_path']}"
-            
-            # Si aucune URL valide n'est trouvée, utiliser l'image par défaut
-            if not cover_image_url:
-                cover_image_url = f"https://{BUCKET_NAME}.s3.{AWS_REGION}.amazonaws.com/{DEFAULT_IMAGE_KEY}"
-            
-            # Ajouter les URLs de couverture au track
-            track_with_url['cover_image'] = cover_image_url
-            track_with_url['coverImageUrl'] = cover_image_url
-            
-            # Générer l'URL présignée pour le fichier audio si nécessaire
-            if 'file_path' in track and not track.get('presigned_url'):
+            # Fonction interne pour générer une URL présignée sécurisée
+            def get_presigned_cover_url(bucket, key):
+                """
+                Génère une URL présignée pour une image de couverture avec plusieurs fallbacks
+                """
                 try:
+                    # Vérifier si le fichier existe réellement
+                    try:
+                        s3.head_object(Bucket=bucket, Key=key)
+                    except s3.exceptions.ClientError as e:
+                        # Si le fichier n'existe pas, lever une exception
+                        if e.response['Error']['Code'] in ['404', '403']:
+                            logger.warning(f"Fichier non trouvé: {key}")
+                            raise FileNotFoundError(f"Fichier non trouvé: {key}")
+                    
+                    # Générer l'URL présignée
                     presigned_url = s3.generate_presigned_url(
                         'get_object',
                         Params={
-                            'Bucket': BUCKET_NAME,
-                            'Key': track['file_path'],
-                            'ResponseContentType': 'audio/mpeg',
+                            'Bucket': bucket, 
+                            'Key': key,
+                            'ResponseContentType': 'image/jpeg',
                             'ResponseContentDisposition': 'inline'
                         },
                         ExpiresIn=86400  # URL valide 24 heures
                     )
-                    track_with_url['presigned_url'] = presigned_url
-                except Exception as e:
-                    logger.error(f"Erreur lors de la génération de l'URL présignée pour {track.get('track_id', 'unknown')}: {str(e)}")
+                    
+                    return presigned_url
+                
+                except (FileNotFoundError, s3.exceptions.ClientError) as e:
+                    logger.warning(f"Impossible de générer l'URL pour {key}: {str(e)}")
+                    return None
+            
+            # Priorités pour trouver l'image de couverture
+            cover_url = None
+            potential_cover_keys = [
+                track.get('cover_image_path'),  # Chemin S3 principal
+                f"tracks/{track.get('track_id')}/cover.png",  # Chemin standard
+                f"tracks/{track.get('track_id')}/cover.jpg",  # Autre format standard
+                default_cover_key  # Fallback ultime
+            ]
+            
+            # Essayer chaque clé potentielle
+            for key in potential_cover_keys:
+                if key:
+                    try:
+                        cover_url = get_presigned_cover_url(BUCKET_NAME, key)
+                        if cover_url:
+                            break
+                    except Exception as e:
+                        logger.warning(f"Erreur lors de la génération de l'URL pour {key}: {str(e)}")
+            
+            # Si aucune URL n'a été trouvée, utiliser l'URL par défaut
+            if not cover_url:
+                default_url = f"https://{BUCKET_NAME}.s3.{AWS_REGION}.amazonaws.com/{default_cover_key}"
+                logger.warning(f"Utilisation de l'URL de couverture par défaut pour la piste {track.get('track_id')}")
+                cover_url = default_url
+            
+            # Ajouter les URLs de couverture au track
+            track_with_url['cover_image'] = cover_url
+            track_with_url['coverImageUrl'] = cover_url
             
             tracks_with_urls.append(track_with_url)
             
         except Exception as track_error:
             logger.error(f"Erreur lors du traitement de la piste: {str(track_error)}")
+            logger.error(traceback.format_exc())
+            
+            # En cas d'erreur, ajouter quand même la piste avec une URL par défaut
+            track_with_url = dict(track)
+            default_url = f"https://{BUCKET_NAME}.s3.{AWS_REGION}.amazonaws.com/{default_cover_key}"
+            track_with_url['cover_image'] = default_url
+            track_with_url['coverImageUrl'] = default_url
+            tracks_with_urls.append(track_with_url)
     
     return tracks_with_urls
 
@@ -789,10 +834,12 @@ def lambda_handler(event, context):
         
         # Si aucune recommandation n'est trouvée, essayer avec le recommandeur simple comme fallback
         if not recommended_tracks:
-            logger.warning(f"Aucune recommandation trouvée avec l'algorithme amélioré. Tentative avec l'algorithme simple.")
-            from original_recommender import SimpleRecommender
-            simple_recommender = SimpleRecommender(tracks_table, users_table, swipes_table)
-            recommended_tracks = simple_recommender.get_recommendations(user_id, MAX_RECOMMENDATIONS)
+            logger.warning(f"Aucune recommandation trouvée avec l'algorithme amélioré.")
+            # Supprimez la ligne qui tente d'importer un module inexistant
+            # recommended_tracks = simple_recommender.get_recommendations(user_id, MAX_RECOMMENDATIONS)
+            
+            # Ou ajoutez un fallback plus simple
+            recommended_tracks = []
         
         # Ajouter des URLs présignées
         tracks_with_urls = generate_presigned_urls(recommended_tracks, user_id)
