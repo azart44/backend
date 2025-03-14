@@ -84,6 +84,23 @@ def generate_presigned_urls(tracks, auth_user_id=None):
             track_with_url['cover_image'] = cover_image_url
             track_with_url['coverImageUrl'] = cover_image_url
             
+            # Générer l'URL présignée pour le fichier audio si nécessaire
+            if 'file_path' in track and not track.get('presigned_url'):
+                try:
+                    presigned_url = s3.generate_presigned_url(
+                        'get_object',
+                        Params={
+                            'Bucket': BUCKET_NAME,
+                            'Key': track['file_path'],
+                            'ResponseContentType': 'audio/mpeg',
+                            'ResponseContentDisposition': 'inline'
+                        },
+                        ExpiresIn=86400  # URL valide 24 heures
+                    )
+                    track_with_url['presigned_url'] = presigned_url
+                except Exception as e:
+                    logger.error(f"Erreur lors de la génération de l'URL présignée pour {track.get('track_id', 'unknown')}: {str(e)}")
+            
             tracks_with_urls.append(track_with_url)
             
         except Exception as track_error:
@@ -135,18 +152,21 @@ class ImprovedRecommender:
             list: Liste des swipes correspondant aux critères
         """
         try:
+            # Construire l'expression de requête de base
+            query_params = {
+                'IndexName': 'user_id-index',
+                'KeyConditionExpression': Key('user_id').eq(user_id)
+            }
+            
             # Construire l'expression de filtre
             filter_expressions = []
             expression_values = {}
+            expression_names = {}
             
             if action:
                 filter_expressions.append('#act = :action')
                 expression_values[':action'] = action
-                
-                # Ajouter ExpressionAttributeNames pour échapper le mot réservé "action"
-                if 'ExpressionAttributeNames' not in query_params:
-                    query_params['ExpressionAttributeNames'] = {}
-                query_params['ExpressionAttributeNames']['#act'] = 'action'
+                expression_names['#act'] = 'action'
             
             if days_limit:
                 # Calculer le timestamp pour la limite de jours
@@ -154,15 +174,13 @@ class ImprovedRecommender:
                 filter_expressions.append('timestamp >= :cutoff')
                 expression_values[':cutoff'] = cutoff_time
             
-            # Construire l'expression de requête
-            query_params = {
-                'IndexName': 'user_id-index',
-                'KeyConditionExpression': Key('user_id').eq(user_id)
-            }
-            
+            # Ajouter les expressions à la requête si nécessaire
             if filter_expressions:
                 query_params['FilterExpression'] = ' AND '.join(filter_expressions)
                 query_params['ExpressionAttributeValues'] = expression_values
+                
+                if expression_names:
+                    query_params['ExpressionAttributeNames'] = expression_names
             
             # Exécuter la requête
             response = self.swipes_table.query(**query_params)
@@ -612,6 +630,7 @@ class ImprovedRecommender:
         start_time = time.time()
         # Allouer 80% du temps d'exécution max de Lambda (défaut 3 secondes)
         max_execution_time = 3
+        
         # 1. Récupérer le profil utilisateur
         try:
             response = self.users_table.get_item(Key={'userId': user_id})
