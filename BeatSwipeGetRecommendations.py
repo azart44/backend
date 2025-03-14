@@ -766,7 +766,6 @@ class ImprovedRecommender:
         
         return recommended_tracks
 
-# Voici le code corrigé pour lambda_handler dans lambda_function.py
 def lambda_handler(event, context):
     """Gestionnaire principal pour les recommandations BeatSwipe"""
     logger.info(f"Événement reçu: {event}")
@@ -811,9 +810,16 @@ def lambda_handler(event, context):
                 'body': json.dumps({'message': 'BeatSwipe est uniquement disponible pour les artistes'})
             }
         
-        # Utiliser le recommandeur simplifié défini dans ce fichier
-        recommender = SimpleRecommender(tracks_table, users_table, swipes_table)
+        # Utiliser le recommandeur amélioré
+        recommender = ImprovedRecommender(tracks_table, users_table, swipes_table, likes_table)
         recommended_tracks = recommender.get_recommendations(user_id, MAX_RECOMMENDATIONS)
+        
+        # Si aucune recommandation n'est trouvée, essayer avec le recommandeur simple comme fallback
+        if not recommended_tracks:
+            logger.warning(f"Aucune recommandation trouvée avec l'algorithme amélioré. Tentative avec l'algorithme simple.")
+            from original_recommender import SimpleRecommender
+            simple_recommender = SimpleRecommender(tracks_table, users_table, swipes_table)
+            recommended_tracks = simple_recommender.get_recommendations(user_id, MAX_RECOMMENDATIONS)
         
         # Ajouter des URLs présignées
         tracks_with_urls = generate_presigned_urls(recommended_tracks, user_id)
@@ -825,18 +831,6 @@ def lambda_handler(event, context):
                 'tracks': tracks_with_urls,
                 'count': len(tracks_with_urls)
             }, cls=DecimalEncoder)
-        }
-    
-    except Exception as e:
-        logger.error(f"Erreur non gérée: {str(e)}")
-        logger.error(traceback.format_exc())
-        return {
-            'statusCode': 500,
-            'headers': cors_headers,
-            'body': json.dumps({
-                'message': 'Erreur interne du serveur',
-                'error': str(e)
-            })
         }
     
     except Exception as e:
